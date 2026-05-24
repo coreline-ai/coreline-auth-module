@@ -1,0 +1,39 @@
+[project]
+name = "coreline-auth"
+version = "0.5.0rc1"
+description = "Independent Coreline authentication, session, permission, and admin-core module"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "argon2-cffi>=23.1.0",
+  "cryptography>=42.0.0",
+  "email-validator>=2.1.0",
+  "fastapi>=0.115.0",
+  "pydantic>=2.5.0",
+  "python-multipart>=0.0.12",
+  "uvicorn[standard]>=0.30.0",
+  "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+  "sqlalchemy[asyncio]>=2.0",
+  "asyncpg>=0.29",
+  "alembic>=1.13",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.3.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coreline_auth"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
