@@ -1,5 +1,7 @@
 <div align="center">
 
+<img width="2752" height="1536" alt="인증 보안 솔루션 주요 특징" src="https://github.com/user-attachments/assets/75adcfe0-b9b5-4b6c-8b6f-556df498230f" />
+
 # 🔐 Coreline Auth
 
 **A production-grade, framework-agnostic authentication module for Python**
