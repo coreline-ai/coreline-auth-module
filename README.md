@@ -696,6 +696,85 @@ make smoke-demo-secure       # production-mode smoke (CSRF + demo-off + audit re
 
 → Full guide: [`docs/self-test-webapp.md`](./docs/self-test-webapp.md)
 
+### 🖼️ Demo screenshots
+
+> Captured live from `make run-demo` with `CORELINE_AUTH_DEMO_MODE=true`. Click any image to view full resolution.
+
+#### Authentication flows
+
+<table>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/01-login.png"><img src="./docs/screenshots/01-login.png" alt="Login page" width="100%"/></a>
+<br/><sub><b>🔑 Login</b> · <code>/login</code> — Email/password + magic link + social + per-role test accounts</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/02-signup.png"><img src="./docs/screenshots/02-signup.png" alt="Signup page" width="100%"/></a>
+<br/><sub><b>📝 Signup</b> · <code>/signup</code> — RBAC user provisioning with email verification</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/03-password-reset.png"><img src="./docs/screenshots/03-password-reset.png" alt="Password reset" width="100%"/></a>
+<br/><sub><b>🔁 Password Reset</b> · <code>/password-reset</code> — Timing-safe (dummy verify on user-miss)</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/04-magic-link-page.png"><img src="./docs/screenshots/04-magic-link-page.png" alt="Magic link consume" width="100%"/></a>
+<br/><sub><b>✨ Magic Link</b> · <code>/magic-link/consume</code> — Atomic one-time token consume</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" colspan="2">
+<a href="./docs/screenshots/05-social-google-dev.png"><img src="./docs/screenshots/05-social-google-dev.png" alt="Social login" width="50%"/></a>
+<br/><sub><b>🌐 Social Login (Google / OIDC)</b> · <code>/social/{provider}</code> — Real OAuth with credentials, deterministic dev connector without</sub>
+</td>
+</tr>
+</table>
+
+#### Application & RBAC
+
+<table>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/06-dashboard.png"><img src="./docs/screenshots/06-dashboard.png" alt="Dashboard" width="100%"/></a>
+<br/><sub><b>🏠 Dashboard</b> · <code>/</code> — Current session, role, permissions overview</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/07-board-list.png"><img src="./docs/screenshots/07-board-list.png" alt="Board list" width="100%"/></a>
+<br/><sub><b>📋 Board (RBAC + ownership)</b> · <code>/board</code> — Persistent SQLite + author/moderator scope</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" colspan="2">
+<a href="./docs/screenshots/08-board-new.png"><img src="./docs/screenshots/08-board-new.png" alt="New post" width="50%"/></a>
+<br/><sub><b>✍️ New Post</b> · <code>/board/new</code> — Permission-gated write with CSRF token</sub>
+</td>
+</tr>
+</table>
+
+#### Admin & Audit
+
+<table>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/09-admin-users.png"><img src="./docs/screenshots/09-admin-users.png" alt="Admin users" width="100%"/></a>
+<br/><sub><b>👮 Admin User Management</b> · <code>/admin</code> — Role update, ban/unban, session revoke · last-owner lockout protected</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/10-admin-audit.png"><img src="./docs/screenshots/10-admin-audit.png" alt="Audit viewer" width="100%"/></a>
+<br/><sub><b>📜 Audit Viewer</b> · <code>/admin/audit</code> — Persistent audit table · <code>audit:read</code> required · metadata redacted</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" colspan="2">
+<a href="./docs/screenshots/11-logout.png"><img src="./docs/screenshots/11-logout.png" alt="Logout" width="50%"/></a>
+<br/><sub><b>🚪 Logout</b> · <code>/logout</code> — Session token revoked + cookie cleared</sub>
+</td>
+</tr>
+</table>
+
+> 💡 **Regenerate screenshots:** the captures above are produced by booting the demo app and walking every route with Playwright. Run `make run-demo` (port 8010), then drive a headless browser through the route list to refresh the gallery.
+
 ---
 
 ## 🧬 Testing
