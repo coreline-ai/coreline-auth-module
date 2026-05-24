@@ -2,6 +2,7 @@
 name = "coreline-auth"
 version = "0.5.0rc1"
 description = "Independent Coreline authentication, session, permission, and admin-core module"
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "argon2-cffi>=23.1.0",
