@@ -780,9 +780,9 @@ without editing the database. The password is shared only in demo mode:
 
 ### 🖼️ Demo screenshots
 
-> Captured live from `make run-demo` with `CORELINE_AUTH_DEMO_MODE=true`. Click any image to view full resolution.
+> **18 pages captured 2026-05-26** from `make run-demo` with `CORELINE_AUTH_DEMO_MODE=true`. Click any image to view full resolution.
 
-#### Authentication flows
+#### 🔐 Authentication flows
 
 <table>
 <tr>
@@ -813,7 +813,7 @@ without editing the database. The password is shared only in demo mode:
 </tr>
 </table>
 
-#### Application & RBAC
+#### 🏠 Application & Board (RBAC)
 
 <table>
 <tr>
@@ -834,28 +834,67 @@ without editing the database. The password is shared only in demo mode:
 </tr>
 </table>
 
-#### Admin & Audit
+#### 👤 Self-service account UX
 
 <table>
 <tr>
 <td width="50%" align="center">
-<a href="./docs/screenshots/09-admin-users.png"><img src="./docs/screenshots/09-admin-users.png" alt="Admin users" width="100%"/></a>
-<br/><sub><b>👮 Admin User Management</b> · <code>/admin</code> — Role update, ban/unban, session revoke · last-owner lockout protected</sub>
+<a href="./docs/screenshots/09-account-profile.png"><img src="./docs/screenshots/09-account-profile.png" alt="Account profile" width="100%"/></a>
+<br/><sub><b>👤 Profile</b> · <code>/account</code> — Display name + identity providers + email verification status</sub>
 </td>
 <td width="50%" align="center">
-<a href="./docs/screenshots/10-admin-audit.png"><img src="./docs/screenshots/10-admin-audit.png" alt="Audit viewer" width="100%"/></a>
-<br/><sub><b>📜 Audit Viewer</b> · <code>/admin/audit</code> — Persistent audit table · <code>audit:read</code> required · metadata redacted</sub>
+<a href="./docs/screenshots/10-account-security.png"><img src="./docs/screenshots/10-account-security.png" alt="Account security" width="100%"/></a>
+<br/><sub><b>🔒 Security</b> · <code>/account/security</code> — Self-serve password change with current-password verification</sub>
 </td>
 </tr>
 <tr>
-<td width="50%" align="center" colspan="2">
-<a href="./docs/screenshots/11-logout.png"><img src="./docs/screenshots/11-logout.png" alt="Logout" width="50%"/></a>
+<td width="50%" align="center">
+<a href="./docs/screenshots/11-account-sessions.png"><img src="./docs/screenshots/11-account-sessions.png" alt="Account sessions" width="100%"/></a>
+<br/><sub><b>📱 Sessions</b> · <code>/account/sessions</code> — Active sessions list with IP/UA hash + per-row revoke</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/12-account-activity.png"><img src="./docs/screenshots/12-account-activity.png" alt="Account activity" width="100%"/></a>
+<br/><sub><b>📒 Activity</b> · <code>/account/activity</code> — Self-readable audit feed (filtered to actor)</sub>
+</td>
+</tr>
+</table>
+
+#### 👮 Admin & Operations
+
+<table>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/13-admin-users.png"><img src="./docs/screenshots/13-admin-users.png" alt="Admin users" width="100%"/></a>
+<br/><sub><b>👮 User Management</b> · <code>/admin</code> — Role update, ban/unban, disable, session revoke · last-owner lockout protected</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/14-admin-user-detail.png"><img src="./docs/screenshots/14-admin-user-detail.png" alt="Admin user detail" width="100%"/></a>
+<br/><sub><b>🔍 User Detail</b> · <code>/admin/users/{id}</code> — Identities, sessions, recent audit, password set</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/15-admin-audit.png"><img src="./docs/screenshots/15-admin-audit.png" alt="Audit viewer" width="100%"/></a>
+<br/><sub><b>📜 Audit Viewer</b> · <code>/admin/audit</code> — Persistent audit · <code>audit:read</code> required · metadata redacted</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/16-system-readiness.png"><img src="./docs/screenshots/16-system-readiness.png" alt="System readiness" width="100%"/></a>
+<br/><sub><b>🩺 Readiness</b> · <code>/system</code> — Secret-safe env check (Google / SMTP / Redis / Postgres / WebAuthn)</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<a href="./docs/screenshots/17-system-email.png"><img src="./docs/screenshots/17-system-email.png" alt="System email" width="100%"/></a>
+<br/><sub><b>📧 Email Preview</b> · <code>/system/email</code> — Template render check (magic / verify / reset bodies)</sub>
+</td>
+<td width="50%" align="center">
+<a href="./docs/screenshots/18-logout.png"><img src="./docs/screenshots/18-logout.png" alt="Logout" width="100%"/></a>
 <br/><sub><b>🚪 Logout</b> · <code>/logout</code> — Session token revoked + cookie cleared</sub>
 </td>
 </tr>
 </table>
 
-> 💡 **Regenerate screenshots:** the captures above are produced by booting the demo app and walking every route with Playwright. Run `make run-demo` (port 8010), then drive a headless browser through the route list to refresh the gallery.
+> 💡 **Regenerate screenshots:** boot the demo (`make run-demo`, port 8010), then drive a headless browser through the route list. Login + admin pages need owner credentials; `/account/*` pages need any active session.
 
 ---
 
