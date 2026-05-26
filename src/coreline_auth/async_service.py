@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import timedelta
 from typing import Callable
@@ -27,6 +28,7 @@ from .models import (
     UserStatus,
     now_utc,
 )
+from .observability import MetricSink
 from .permissions import PolicyEngine
 from .rate_limit import FixedWindowRateLimiter, RateLimiter
 from .security import SafeReturnToPolicy, generate_token, hash_optional_context, hash_password, hash_secret, verify_dummy_password, verify_password
@@ -35,6 +37,7 @@ from .storage.async_base import AsyncAuthStorage
 from .storage.audit import redact_audit_metadata
 
 AuditSink = Callable[[AuditEvent], None]
+logger = logging.getLogger("coreline_auth")
 
 
 class AsyncCorelineAuthService:
@@ -51,6 +54,7 @@ class AsyncCorelineAuthService:
         storage: AsyncAuthStorage,
         config: CorelineAuthConfig,
         audit_sink: AuditSink | None = None,
+        metric_sink: MetricSink | None = None,
         email_sender: EmailSender | None = None,
         rate_limiter: RateLimiter | None = None,
     ) -> None:
@@ -60,6 +64,7 @@ class AsyncCorelineAuthService:
         self.policy = PolicyEngine(profile=config.profile, owner_email=config.owner_email)
         self.return_to_policy = SafeReturnToPolicy()
         self.audit_sink = audit_sink
+        self.metric_sink = metric_sink
         self.email_sender = email_sender
         self.rate_limiter = rate_limiter or FixedWindowRateLimiter()
 
@@ -130,7 +135,7 @@ class AsyncCorelineAuthService:
         flow = LoginFlow(id=f"flow_{uuid4().hex}", flow_type=FlowType.MAGIC_LINK, provider="email", state_hash=hash_secret(token), email=normalized_email, return_to=return_to, created_at=now, expires_at=now + timedelta(seconds=self.config.login_flow_ttl_seconds))
         saved = await self.storage.create_login_flow(flow)
         if self.email_sender is not None:
-            self.email_sender.send_magic_link(email=normalized_email, token=token, return_to=return_to)
+            self._send_email_best_effort("magic_link", lambda: self.email_sender.send_magic_link(email=normalized_email, token=token, return_to=return_to))
         await self._audit("auth.magic_link.request", metadata={"email_hash": hash_secret(normalized_email)})
         return MagicLinkChallenge(token=token, flow=saved)
 
@@ -205,9 +210,30 @@ class AsyncCorelineAuthService:
 
     async def _audit(self, action: str, *, actor_user_id: str | None = None, target_user_id: str | None = None, metadata: dict[str, object] | None = None) -> None:
         event = AuditEvent(action=action, actor_user_id=actor_user_id, target_user_id=target_user_id, metadata=redact_audit_metadata(metadata or {}))
-        await self.storage.record_audit_event(event)
+        try:
+            await self.storage.record_audit_event(event)
+        except Exception as exc:
+            logger.warning("coreline_auth.audit_write_failed", extra={"action": action, "error_type": type(exc).__name__})
         if self.audit_sink is not None:
-            self.audit_sink(event)
+            try:
+                self.audit_sink(event)
+            except Exception as exc:
+                logger.warning("coreline_auth.audit_sink_failed", extra={"action": action, "error_type": type(exc).__name__})
+
+    def _send_email_best_effort(self, kind: str, send: Callable[[], object]) -> None:
+        try:
+            send()
+        except Exception as exc:  # pragma: no cover - sender failures are adapter-defined
+            self._metric("auth.email_send_failed", {"kind": kind})
+            logger.warning("coreline_auth.email_send_failed", extra={"kind": kind, "error_type": type(exc).__name__})
+
+    def _metric(self, name: str, values: dict[str, object] | None = None) -> None:
+        if self.metric_sink is None:
+            return
+        try:
+            self.metric_sink(name, dict(values or {}))
+        except Exception as exc:  # pragma: no cover - host sinks must never break auth flows
+            logger.warning("coreline_auth.metric_sink_failed", extra={"metric": name, "error_type": type(exc).__name__})
 
     def _check_rate_limit(self, key: str, *, limit: int) -> None:
         decision = self.rate_limiter.check(key, limit=limit, window_seconds=60)

@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from urllib.parse import parse_qs
 
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
 from coreline_auth import AuthValidationError, CsrfProtector
 from coreline_auth.fastapi_adapter import CSRF_COOKIE_NAME
@@ -40,10 +40,14 @@ def demo_csrf_middleware(csrf: CsrfProtector):
                 token = form.get("csrf_token", [None])[-1]
                 cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
                 if not isinstance(token, str) or not cookie_token or not hmac.compare_digest(token, cookie_token):
+                    if request.url.path == "/logout":
+                        return RedirectResponse("/logout?csrf=expired", status_code=303)
                     return Response("Invalid CSRF token", status_code=403)
                 try:
                     csrf.verify_global(token)
                 except AuthValidationError:
+                    if request.url.path == "/logout":
+                        return RedirectResponse("/logout?csrf=expired", status_code=303)
                     return Response("Invalid CSRF token", status_code=403)
 
                 async def receive():

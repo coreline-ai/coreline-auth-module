@@ -10,16 +10,17 @@ _Independent auth · session · permission · admin core — built for reuse acr
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-0.5.0--rc1-blue.svg?style=for-the-badge)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.0--rc2-blue.svg?style=for-the-badge)](./CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.12+-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-131%20passed-success.svg?style=for-the-badge&logo=pytest&logoColor=white)](./tests/)
+[![Tests](https://img.shields.io/badge/tests-149%20passed-success.svg?style=for-the-badge&logo=pytest&logoColor=white)](./tests/)
 [![Status](https://img.shields.io/badge/status-release%20candidate-orange.svg?style=for-the-badge)](#-roadmap)
 
 [![Security](https://img.shields.io/badge/security-Argon2id%20%7C%20AES--GCM%20%7C%20RS256-red.svg?style=flat-square)](./docs/security-checklist.md)
 [![MFA](https://img.shields.io/badge/MFA-TOTP%20%7C%20WebAuthn%20%7C%20AAL2-blueviolet.svg?style=flat-square)](./docs/mfa-passkey-scope.md)
 [![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20Postgres%20%7C%20Redis-336791.svg?style=flat-square&logo=postgresql&logoColor=white)](./docs/production-roadblocks-roadmap.md)
 [![Observability](https://img.shields.io/badge/observability-Prometheus%20%7C%20JSONL%20SIEM-E6522C.svg?style=flat-square&logo=prometheus&logoColor=white)](./src/coreline_auth/observability.py)
+[![Readiness](https://img.shields.io/badge/readiness-secret--safe%20CLI-1f883d.svg?style=flat-square)](./docs/ops-readiness.md)
 [![Zero Coupling](https://img.shields.io/badge/CoreMCP%20coupling-0%20imports-brightgreen.svg?style=flat-square)](./src/coreline_auth/)
 
 <br/>
@@ -47,6 +48,7 @@ _Independent auth · session · permission · admin core — built for reuse acr
 ✓ Pluggable  — Storage / EmailSender / RateLimiter / MfaVault / SocialConnector / MetricSink Protocols
 ✓ Observable — Prometheus counters · JSONL SIEM forwarder · structured logging via stdlib
 ✓ Async-ready — Postgres async adapter · AsyncCorelineAuthService · Alembic migrations
+✓ Demo-ready — signup/login · account center · admin console · board RBAC · system readiness
 ```
 
 ---
@@ -71,6 +73,7 @@ _Independent auth · session · permission · admin core — built for reuse acr
   - [SMTP & email providers](#smtp--email-providers)
   - [OAuth / OIDC providers](#oauth--oidc-providers)
   - [Operational defaults](#operational-defaults)
+  - [Secret-safe readiness check](#secret-safe-readiness-check)
 - [Reference Comparison](#-reference-comparison)
 - [Self-Test Webapp](#-self-test-webapp)
 - [Testing](#-testing)
@@ -136,6 +139,8 @@ _Independent auth · session · permission · admin core — built for reuse acr
 - 📊 **Prometheus** text exporter (counter-only, zero deps)
 - 📜 **JSONL SIEM** event sink
 - 🩺 **Health-check protocol** on every storage adapter
+- ✅ **Secret-safe readiness CLI** for local/CI production checks
+- 📬 **Email outbox + template preview** for dev SMTP-free testing
 - 🔌 **Pluggable Protocols** (Storage / Email / RateLimiter / Vault / MetricSink)
 - 🐘 **WAL + busy_timeout** on SQLite
 - 👮 **RBAC** with owner/admin/moderator/author/viewer/user roles
@@ -143,6 +148,19 @@ _Independent auth · session · permission · admin core — built for reuse acr
 </td>
 </tr>
 </table>
+
+### 🧭 Included production-style web surfaces
+
+The bundled SaaS demo is intentionally more than a login page. It is a complete
+host-app reference showing how the module behaves in real application screens.
+
+| Surface | Routes | Purpose |
+|---|---|---|
+| Auth flows | `/login`, `/signup`, `/magic-link/*`, `/password-reset/*`, `/social/*` | Email/password, signup, magic-link, reset, and Google/Facebook/OIDC connector wiring |
+| Account center | `/account`, `/account/security`, `/account/sessions`, `/account/activity` | Personal profile, password change, MFA/security status, own session revoke, own activity |
+| RBAC board | `/board`, `/board/new`, `/board/{id}` | Permission + ownership demo for author/moderator/admin paths |
+| Admin console | `/admin`, `/admin/users/{id}`, `/admin/audit` | User counts, role distribution, user detail, disable/enable, password set, session revoke, audit filters |
+| System console | `/system`, `/system/email` | Storage health, provider readiness, runbook, email outbox, template preview |
 
 ---
 
@@ -220,7 +238,6 @@ def create_post(): ...
 <summary><b>Run the bundled demo SaaS app in 30 seconds</b></summary>
 
 ```bash
-cd packages/coreline-auth
 make run-demo
 # → http://127.0.0.1:8010/login
 # Default credentials (demo mode only):  owner@example.com / coreline-demo-password
@@ -342,7 +359,29 @@ code should use domain-specific paths when that makes ownership clearer.
 | `verify_totp_enrollment(user_id, factor_id, code)` | `AuthMfaFactor` | One-time activation |
 | `step_up_totp(session_token, code)` | `Principal` | Persists AAL2 in DB ✓ |
 | `generate_recovery_codes(user_id, count=10)` | `list[str]` | Hash-only storage |
+| `step_up_recovery_code(session_token, code)` | `Principal` | Atomic one-time recovery-code step-up |
 | `require_aal2(session_token)` | `Principal` | Sensitive-action guard |
+| `revoke_session(session_id, actor_user_id=...)` | `None` | Session revoke with audit |
+| `list_audit_events(...)` | `list[AuditEvent]` | Action/actor/target/time range filters |
+| `health_check()` | `None` | Delegates to storage adapter health check |
+
+### Admin service entry points
+
+| Method | Permission | Notes |
+|---|---|---|
+| `list_users(...)` | `users:read` | Query/status/role filters for admin dashboards |
+| `update_user_role(...)` | `users:write` | Blocks self-demotion and last privileged lockout |
+| `ban_user(...)` / `unban_user(...)` | `users:ban` | Reason metadata is audit-redacted/capped |
+| `disable_user(...)` / `enable_user(...)` | `users:write` | Non-destructive lifecycle control |
+| `set_user_password(...)` | `users:write` | Revokes existing sessions after password set |
+| `list_sessions_for_user(...)` | `sessions:revoke` | Admin session visibility |
+| `revoke_session(...)` | `sessions:revoke` | Targeted session revoke |
+
+### Async service parity
+
+`AsyncCorelineAuthService` exposes the production async subset used by the
+Postgres adapter: password login, magic link, session verify/logout, audit list,
+cleanup, best-effort email delivery, best-effort audit, and metric sink hooks.
 
 ### FastAPI adapter
 
@@ -366,7 +405,7 @@ require_permission(auth, "users:read") -> Callable
 <details>
 <summary><b>Public symbols exported by <code>__init__.py</code></b></summary>
 
-> 70+ symbols including: `CorelineAuthService`, `CorelineAuthConfig`, `AuthStorage`, `AsyncAuthStorage`, `SQLiteAuthStorage`, `AsyncPostgresAuthStorage`, `MemoryAuthStorage`, `AsyncMemoryAuthStorage`, `CsrfProtector`, `SecretEnvelopeProtector`, `SQLiteMfaSecretVault`, `RedisMfaSecretVault`, `FixedWindowRateLimiter`, `RedisFixedWindowRateLimiter`, `MetricSink`, `InMemoryMetricSink`, `LoggingMetricSink`, `PrometheusTextMetricSink`, `JsonLineSecurityEventSink`, `GoogleOAuthConnector`, `FacebookOAuthConnector`, `GenericOIDCConnector`, `DevSocialConnector`, `verify_google_id_token`, `verify_oidc_id_token`, `verify_passkey_assertion_response`, `verify_passkey_registration_response`, `generate_webauthn_challenge`, `OAuthPKCE`, `JWKSCache`, `OIDCMetadataClient`, and the full RBAC primitive set.
+> 90 symbols including: `CorelineAuthService`, `CorelineAuthConfig`, `AuthStorage`, `AsyncAuthStorage`, `SQLiteAuthStorage`, `AsyncPostgresAuthStorage`, `MemoryAuthStorage`, `AsyncMemoryAuthStorage`, `CsrfProtector`, `SecretEnvelopeProtector`, `SQLiteMfaSecretVault`, `RedisMfaSecretVault`, `FixedWindowRateLimiter`, `RedisFixedWindowRateLimiter`, `MetricSink`, `InMemoryMetricSink`, `LoggingMetricSink`, `PrometheusTextMetricSink`, `JsonLineSecurityEventSink`, `GoogleOAuthConnector`, `FacebookOAuthConnector`, `GenericOIDCConnector`, `DevSocialConnector`, `verify_google_id_token`, `verify_oidc_id_token`, `verify_passkey_assertion_response`, `verify_passkey_registration_response`, `generate_webauthn_challenge`, `OAuthPKCE`, `JWKSCache`, `OIDCMetadataClient`, and the full RBAC primitive set.
 
 </details>
 
@@ -384,11 +423,12 @@ require_permission(auth, "users:read") -> Callable
 | **MFA secret vault** | AES-256-GCM envelope, 12-byte nonce, AAD = factor_id | [`encryption.py`](./src/coreline_auth/encryption.py) |
 | **TOTP** | RFC 6238 SHA-1, drift window=1, **counter replay reject** | [`mfa.py`](./src/coreline_auth/mfa.py) |
 | **Recovery codes** | Hash-only, one-time, atomic `WHERE used_at IS NULL` | [`storage/sqlite.py`](./src/coreline_auth/storage/sqlite.py) |
-| **OIDC ID token** | RS256, `iss` / `aud` / `exp` / `iat` / `nbf` / `azp` / `nonce` / `max_age` | [`social.py`](./src/coreline_auth/social.py) |
-| **JWKS** | TTL cache + per-kid negative cache cooldown (anti-DoS) | [`social.py`](./src/coreline_auth/social.py) |
-| **PKCE** | RFC 7636, S256, 64-byte verifier default | [`social.py`](./src/coreline_auth/social.py) |
+| **OIDC ID token** | RS256, `iss` / `aud` / `exp` / `iat` / `nbf` / `azp` / `nonce` / `max_age` | [`social/verification.py`](./src/coreline_auth/social/verification.py) |
+| **JWKS** | TTL cache + per-kid negative cache cooldown (anti-DoS) | [`social/discovery.py`](./src/coreline_auth/social/discovery.py) |
+| **PKCE** | RFC 7636, S256, 64-byte verifier default | [`social/models.py`](./src/coreline_auth/social/models.py) |
 | **WebAuthn** | rpIdHash + sign-counter replay + ECDSA-P256 / RSA PKCS1v15 | [`webauthn.py`](./src/coreline_auth/webauthn.py) |
 | **Audit redaction** | key-name allowlist + max_keys=50 / max_str=1000 / max_depth=4 | [`storage/audit.py`](./src/coreline_auth/storage/audit.py) |
+| **Readiness checks** | Secret-safe env readiness; no external connection by default | [`ops_readiness.py`](./src/coreline_auth/ops_readiness.py) |
 
 ### Threat model summary
 
@@ -649,6 +689,28 @@ http://127.0.0.1:8010/social/facebook/callback
 
 → Full release-gate checklist: [`docs/security-checklist.md`](./docs/security-checklist.md)
 
+### Secret-safe readiness check
+
+Use this before attaching the module to a real project or deployment. It checks
+whether production integrations are configured without connecting to external
+services and without printing secret values.
+
+```bash
+make readiness-check
+uv run python -m coreline_auth.ops_readiness --json
+```
+
+| Area | Required variables | Output policy |
+|---|---|---|
+| Google OAuth | `CORELINE_AUTH_GOOGLE_CLIENT_ID`, `CORELINE_AUTH_GOOGLE_CLIENT_SECRET` | Ready/missing only |
+| Facebook OAuth | `CORELINE_AUTH_FACEBOOK_CLIENT_ID`, `CORELINE_AUTH_FACEBOOK_CLIENT_SECRET` | Ready/missing only |
+| SMTP | `CORELINE_AUTH_SMTP_HOST`, `CORELINE_AUTH_SMTP_FROM` | Host readiness only; no password output |
+| Redis | `CORELINE_AUTH_REDIS_URL` | Presence check only |
+| Postgres | `CORELINE_AUTH_POSTGRES_DSN` | Presence check only |
+| WebAuthn | `CORELINE_AUTH_WEBAUTHN_RP_ID`, `CORELINE_AUTH_WEBAUTHN_ORIGIN` | Presence check only |
+
+→ Full runbook: [`docs/ops-readiness.md`](./docs/ops-readiness.md)
+
 ---
 
 ## 📊 Reference Comparison
@@ -682,7 +744,21 @@ A complete SaaS-style demo lives under [`src/coreline_auth/examples/`](./src/cor
 make run-demo                # http://127.0.0.1:8010/login
 make smoke-demo              # pytest-only smoke
 make smoke-demo-secure       # production-mode smoke (CSRF + demo-off + audit redaction)
+make readiness-check          # secret-safe production readiness config check
 ```
+
+Demo mode seeds representative users so every permission path can be tested
+without editing the database. The password is shared only in demo mode:
+
+| Role | Example account | What to verify |
+|---|---|---|
+| Admin login | `owner@example.com` / `coreline-demo-password` | Admin dashboard, audit, system, user lifecycle |
+| OWNER | `owner-board@example.com` / `coreline-demo-password` | Full board ownership permissions |
+| ADMIN | `admin-board@example.com` / `coreline-demo-password` | Board-wide management paths |
+| MODERATOR | `moderator-board@example.com` / `coreline-demo-password` | Moderate posts/comments without user admin |
+| AUTHOR | `author-board@example.com` / `coreline-demo-password` | Own post/comment create/edit/delete |
+| USER | `user-board@example.com` / `coreline-demo-password` | Basic board participation |
+| VIEWER | `viewer-board@example.com` / `coreline-demo-password` | Read-only board and styled 403 for admin/system routes |
 
 <table>
 <tr><th>Flow</th><th>Endpoint</th><th>Notes</th></tr>
@@ -691,12 +767,16 @@ make smoke-demo-secure       # production-mode smoke (CSRF + demo-off + audit re
 <tr><td>Magic link</td><td><code>/magic-link/request</code> · <code>/magic-link/consume</code></td><td>One-time atomic consume</td></tr>
 <tr><td>Password reset</td><td><code>/password-reset/request</code> · <code>/password-reset/consume</code></td><td>Revokes sessions on success</td></tr>
 <tr><td>Social login</td><td><code>/social/{provider}/start</code> · <code>/callback</code></td><td>Dev connector when credentials absent</td></tr>
+<tr><td>Account self-service</td><td><code>/account</code> · <code>/account/security</code> · <code>/account/sessions</code> · <code>/account/activity</code></td><td>Profile, password change, MFA status, self session revoke, personal activity</td></tr>
 <tr><td>Board (RBAC + ownership)</td><td><code>/board</code></td><td>Persistent SQLite + author scope</td></tr>
-<tr><td>Admin user management</td><td><code>/admin/users</code></td><td>Last-owner lockout protected</td></tr>
-<tr><td>Audit viewer</td><td><code>/admin/audit</code></td><td>Requires <code>audit:read</code> permission</td></tr>
+<tr><td>Admin dashboard</td><td><code>/admin</code> · <code>/admin/users/{id}</code></td><td>Role/status distribution, user detail, disable/enable, password set, session revoke</td></tr>
+<tr><td>Audit viewer</td><td><code>/admin/audit</code></td><td>Requires <code>audit:read</code>; action/actor/target/time range filters</td></tr>
+<tr><td>System health</td><td><code>/system</code></td><td>Storage health, provider readiness, runbook card</td></tr>
+<tr><td>Email outbox</td><td><code>/system/email</code></td><td>Dev sender queue + template preview without external SMTP</td></tr>
 </table>
 
-→ Full guide: [`docs/self-test-webapp.md`](./docs/self-test-webapp.md)
+→ Full guide: [`docs/self-test-webapp.md`](./docs/self-test-webapp.md)<br/>
+→ Ops readiness: [`docs/ops-readiness.md`](./docs/ops-readiness.md)
 
 ### 🖼️ Demo screenshots
 
@@ -784,7 +864,7 @@ make smoke-demo-secure       # production-mode smoke (CSRF + demo-off + audit re
 ```bash
 cd packages/coreline-auth
 
-# Full test suite (131 tests, ~12s)
+# Full test suite (149 tests, ~17s)
 make test
 
 # Direct invocations
@@ -815,6 +895,9 @@ make postgres-docker-smoke
 | `test_async_service.py` | Async service layer parity |
 | `test_postgres_storage.py` | SQLAlchemy async + Alembic |
 | `test_release_blockers_r5.py` | **R5 regression** — AAL2 round-trip + concurrent consume races |
+| `test_demo_webapp.py` | SaaS demo flows — account/admin/system/email/dashboard UX |
+| `test_demo_config.py` | Demo config safety defaults |
+| `test_ops_readiness.py` | Secret-safe readiness CLI/output |
 
 ---
 
@@ -823,9 +906,10 @@ make postgres-docker-smoke
 | Version | Status | Highlights |
 |---|---|---|
 | **v0.4** | ✅ Shipped | Initial core + RBAC board demo + admin/OIDC/MFA groundwork |
-| **v0.5.0-rc1** | 🟡 Current | CSRF · OIDC `azp/nbf/max_age` · TOTP/AAL2 · audit redaction · production hardening |
-| **v0.5.0 GA** | 🔜 Next | docstrings · `pytest --cov` config · CHANGELOG migration notes |
-| **v0.6** | 🧭 Designed | Async core + Postgres adapter + WebAuthn full + Prometheus (early-merged into rc1) |
+| **v0.5.0-rc1** | ✅ Shipped | CSRF · OIDC `azp/nbf/max_age` · TOTP/AAL2 · audit redaction · production hardening |
+| **v0.5.0-rc2** | 🟡 Current | Account center · admin user detail · system/email console · readiness CLI · async hardening |
+| **v0.5.0 GA** | 🔜 Next | External SMTP/OAuth/Postgres/Redis/WebAuthn smoke + docs polish |
+| **v0.6** | 🧭 Designed | Deeper async parity · provider token vault workflows · external integration hardening |
 | **v0.7** | 🌟 Candidate | Risk-based auth · device fingerprint AAL2 escalation · async email providers |
 | **v1.0** | 🎯 Target | API stability commitment · SemVer guarantee · namespaced exports |
 
@@ -843,6 +927,7 @@ make postgres-docker-smoke
 <tr><td><strong>Production hardening review</strong></td><td><a href="./docs/production-hardening-review-20260524.md">production-hardening-review-20260524.md</a></td></tr>
 <tr><td><strong>Reference comparison</strong></td><td><a href="./docs/reference-comparison.md">reference-comparison.md</a></td></tr>
 <tr><td><strong>Self-test webapp guide</strong></td><td><a href="./docs/self-test-webapp.md">self-test-webapp.md</a></td></tr>
+<tr><td><strong>Ops readiness runbook</strong></td><td><a href="./docs/ops-readiness.md">ops-readiness.md</a></td></tr>
 <tr><td><strong>MFA / passkey scope</strong></td><td><a href="./docs/mfa-passkey-scope.md">mfa-passkey-scope.md</a></td></tr>
 <tr><td><strong>OIDC real-provider smoke</strong></td><td><a href="./docs/oidc-real-provider-smoke.md">oidc-real-provider-smoke.md</a></td></tr>
 <tr><td><strong>SQLite migration checklist</strong></td><td><a href="./docs/migration-checklist.md">migration-checklist.md</a></td></tr>
@@ -867,8 +952,8 @@ make postgres-docker-smoke
 ## 📦 Project Stats
 
 ```
-Source:     ~5,300 LOC across 18 modules (excluding examples)
-Tests:      131 passed · 1 skipped (external dep) · 12 suites
+Source:     ~5,800 LOC across 39 modules (excluding examples)
+Tests:      149 passed · 1 skipped (external dep) · 22 test files
 Reviews:    6 expert review rounds — see dev-plan/ for receipts
 Coupling:   0 imports of host project (CoreMCP)
 Deps:       argon2-cffi · cryptography · fastapi · pydantic · httpx · email-validator
@@ -880,7 +965,7 @@ Python:     3.12
 
 ## 📄 License
 
-Internal Coreline project module. License file forthcoming with v1.0 release. See [`AGENTS.md`](./AGENTS.md) for contribution norms.
+MIT License. See [`LICENSE`](./LICENSE) and [`SECURITY.md`](./SECURITY.md).
 
 ---
 

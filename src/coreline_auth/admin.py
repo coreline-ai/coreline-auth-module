@@ -54,6 +54,27 @@ class CorelineAdminService:
         self.auth._audit("auth.admin.user_unban", actor_user_id=actor.user_id, target_user_id=user.id, metadata=self._reason_metadata(reason))
         return updated
 
+    def disable_user(self, *, actor_session_token: str, user_id: str, reason: str | None = None) -> AuthUser:
+        actor = self.auth.verify_session(actor_session_token, required_permission="users:write")
+        user = self.auth._require_user(user_id)
+        if user.id == actor.user_id:
+            raise AuthorizationDenied("admins cannot disable their own account")
+        if self._is_privileged_role(user.role):
+            self._require_another_active_privileged_user(user.id)
+        updated = replace(user, status=UserStatus.DISABLED, updated_at=now_utc())
+        self.auth.storage.update_user(updated)
+        self.auth.storage.revoke_sessions_for_user(user.id)
+        self.auth._audit("auth.admin.user_disable", actor_user_id=actor.user_id, target_user_id=user.id, metadata=self._reason_metadata(reason))
+        return updated
+
+    def enable_user(self, *, actor_session_token: str, user_id: str, reason: str | None = None) -> AuthUser:
+        actor = self.auth.verify_session(actor_session_token, required_permission="users:write")
+        user = self.auth._require_user(user_id)
+        updated = replace(user, status=UserStatus.ACTIVE, updated_at=now_utc())
+        self.auth.storage.update_user(updated)
+        self.auth._audit("auth.admin.user_enable", actor_user_id=actor.user_id, target_user_id=user.id, metadata=self._reason_metadata(reason))
+        return updated
+
     def set_user_password(self, *, actor_session_token: str, user_id: str, password: str) -> AuthCredential:
         actor = self.auth.verify_session(actor_session_token, required_permission="users:write")
         credential = self.auth.set_password(user_id, password)

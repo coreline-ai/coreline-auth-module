@@ -1,4 +1,4 @@
-.PHONY: test import-guard run-demo smoke-demo smoke-demo-secure secret-grep postgres-smoke postgres-migration-sql postgres-docker-smoke
+.PHONY: test import-guard readiness-check run-demo smoke-demo smoke-demo-secure secret-grep postgres-smoke postgres-migration-sql postgres-docker-smoke
 
 test:
 	uv run pytest -q
@@ -7,6 +7,9 @@ test:
 
 import-guard:
 	! grep -RIn "CoreMCP\|coremcp" src/coreline_auth
+
+readiness-check:
+	uv run python -m coreline_auth.ops_readiness
 
 run-demo:
 	uv run uvicorn coreline_auth.examples.saas_app:app --reload --port 8010

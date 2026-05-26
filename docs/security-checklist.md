@@ -9,6 +9,11 @@
 - Social linking falls back to email only when provider email is verified.
 - Demo owner password and debug magic/reset tokens are shown only with `CORELINE_AUTH_DEMO_MODE=true`.
 - Audit viewer requires `audit:read`.
+- Account self-service pages are scoped to the current session user only.
+- Admin user detail and `/system` require admin/audit permissions and render a styled 403 page for non-admin users.
+- `/system` provider readiness checks display only readiness state, never OAuth/SMTP/Redis/Postgres secret values.
+- `python -m coreline_auth.ops_readiness` and `make readiness-check` provide the same secret-safe readiness check for CI/runbooks.
+- `/system/email` redacts queued token values to short hash fingerprints and is permission-protected with `audit:read`.
 - Audit metadata redacts token/password/secret/credential/authorization keys.
 - Provider access/refresh/id tokens are not stored by default.
 - TOTP seeds must be stored through a host-provided encrypted `MfaSecretVault` in production.

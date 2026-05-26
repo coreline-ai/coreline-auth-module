@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from coreline_auth import AsyncCorelineAuthService, AuthProfile, CorelineAuthConfig, CsrfProtector, AuthenticationFailed, mount_async_auth_routes
+from coreline_auth import AsyncCorelineAuthService, AuthProfile, CorelineAuthConfig, CsrfProtector, InMemoryMetricSink, AuthenticationFailed, mount_async_auth_routes
 from coreline_auth.storage import AsyncMemoryAuthStorage
 
 
@@ -18,6 +18,22 @@ class CountingAsyncMemoryAuthStorage(AsyncMemoryAuthStorage):
     async def update_session(self, session):
         self.session_updates += 1
         return await super().update_session(session)
+
+
+class FailingAuditAsyncMemoryAuthStorage(AsyncMemoryAuthStorage):
+    async def record_audit_event(self, event):
+        raise RuntimeError("audit sink down")
+
+
+class FailingEmailSender:
+    def send_magic_link(self, *, email: str, token: str, return_to: str) -> None:
+        raise RuntimeError("smtp down")
+
+    def send_email_verification(self, *, email: str, token: str) -> None:
+        raise RuntimeError("smtp down")
+
+    def send_password_reset(self, *, email: str, token: str) -> None:
+        raise RuntimeError("smtp down")
 
 
 def run(coro):
@@ -96,6 +112,36 @@ def test_async_session_touch_interval_zero_updates_session() -> None:
         issued = await service.login_password(email="user@example.com", password="correct horse battery")
         await service.verify_session(issued.token)
         assert storage.session_updates == 1
+
+    run(scenario())
+
+
+def test_async_audit_write_failure_does_not_break_auth_flow() -> None:
+    async def scenario() -> None:
+        service = AsyncCorelineAuthService(
+            storage=FailingAuditAsyncMemoryAuthStorage(),
+            config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False),
+        )
+        user = await service.create_user(email="user@example.com", password="correct horse battery", email_verified=True)
+        assert user.primary_email == "user@example.com"
+        issued = await service.login_password(email="user@example.com", password="correct horse battery")
+        assert (await service.verify_session(issued.token)).email == "user@example.com"
+
+    run(scenario())
+
+
+def test_async_magic_link_email_failure_is_best_effort() -> None:
+    async def scenario() -> None:
+        metrics = InMemoryMetricSink()
+        service = AsyncCorelineAuthService(
+            storage=AsyncMemoryAuthStorage(),
+            config=CorelineAuthConfig(profile=AuthProfile.SINGLE_OWNER, owner_email="owner@example.com"),
+            email_sender=FailingEmailSender(),
+            metric_sink=metrics,
+        )
+        challenge = await service.request_magic_link(email="owner@example.com")
+        assert challenge.token
+        assert metrics.count("auth.email_send_failed") == 1
 
     run(scenario())
 
