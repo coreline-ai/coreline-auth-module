@@ -48,7 +48,7 @@ _Independent auth · session · permission · admin core — built for reuse acr
 ✓ Pluggable  — Storage / EmailSender / RateLimiter / MfaVault / SocialConnector / MetricSink Protocols
 ✓ Observable — Prometheus counters · JSONL SIEM forwarder · structured logging via stdlib
 ✓ Async-ready — Postgres async adapter · AsyncCorelineAuthService · Alembic migrations
-✓ Demo-ready — signup/login · account center · admin console · board RBAC · system readiness
+✓ Demo-ready — signup/login · account center · admin console · system readiness
 ```
 
 ---
@@ -143,7 +143,7 @@ _Independent auth · session · permission · admin core — built for reuse acr
 - 📬 **Email outbox + template preview** for dev SMTP-free testing
 - 🔌 **Pluggable Protocols** (Storage / Email / RateLimiter / Vault / MetricSink)
 - 🐘 **WAL + busy_timeout** on SQLite
-- 👮 **RBAC** with owner/admin/moderator/author/viewer/user roles
+- 👮 **RBAC** with owner/admin/viewer/user auth roles
 
 </td>
 </tr>
@@ -158,7 +158,6 @@ host-app reference showing how the module behaves in real application screens.
 |---|---|---|
 | Auth flows | `/login`, `/signup`, `/magic-link/*`, `/password-reset/*`, `/social/*` | Email/password, signup, magic-link, reset, and Google/Facebook/OIDC connector wiring |
 | Account center | `/account`, `/account/security`, `/account/sessions`, `/account/activity` | Personal profile, password change, MFA/security status, own session revoke, own activity |
-| RBAC board | `/board`, `/board/new`, `/board/{id}` | Permission + ownership demo for author/moderator/admin paths |
 | Admin console | `/admin`, `/admin/users/{id}`, `/admin/audit` | User counts, role distribution, user detail, disable/enable, password set, session revoke, audit filters |
 | System console | `/system`, `/system/email` | Storage health, provider readiness, runbook, email outbox, template preview |
 
@@ -230,8 +229,8 @@ from fastapi import Depends
 @app.get("/me", dependencies=[Depends(require_session(auth))])
 def me(): ...
 
-@app.post("/posts", dependencies=[Depends(require_permission(auth, "posts:write"))])
-def create_post(): ...
+@app.post("/admin/users", dependencies=[Depends(require_permission(auth, "users:write"))])
+def create_user(): ...
 ```
 
 <details>
@@ -314,7 +313,7 @@ CoreMCP / your-app  ──▶  coreline_auth  ──▶  (Postgres / Redis / KMS
 | Storage adapters | `storage/memory.py`, `storage/sqlite.py`, `storage/postgres.py` | Embedded sync and production async implementations. |
 | Social/OIDC | `social/{models,connectors,discovery,verification}.py` | Keeps `coreline_auth.social` import compatibility while avoiding a large single module. |
 | Web adapters | `fastapi_adapter.py`, `fastapi_async_adapter.py` | Host-framework integration only; no storage-specific logic. |
-| Demo app | `examples/saas_app.py`, `examples/saas_demo/*`, `examples/board_*` | Production-style self-test app; layout/config/CSRF and board domain are split from route wiring. |
+| Demo app | `examples/saas_app.py`, `examples/saas_demo/*` | Production-style auth self-test app; layout/config/CSRF are split from route wiring. |
 
 ### Recommended import policy
 
@@ -475,7 +474,7 @@ flowchart LR
     subgraph Profile
         SO[single_owner] --> OWNER
         AV[admin_viewer] --> A1[OWNER + viewer-only]
-        RB[rbac] --> ALL[OWNER · ADMIN · MODERATOR · AUTHOR · VIEWER · USER]
+        RB[rbac] --> ALL[OWNER · ADMIN · VIEWER · USER]
     end
 
     subgraph Permissions["Permission strings"]
@@ -484,20 +483,18 @@ flowchart LR
         users_ban["users:ban"]
         sessions_revoke["sessions:revoke"]
         audit_read["audit:read"]
-        posts_write["posts:write · scope:own"]
+        profile_read["profile:read"]
     end
 
     OWNER --> users_read & users_write & users_ban & sessions_revoke & audit_read
-    ALL --> posts_write
+    USER --> profile_read
 ```
 
 | Role | Scope | Default permissions |
 |---|---|---|
 | **OWNER** | global | full admin + everything below |
 | **ADMIN** | global | `users:read/write/ban` · `sessions:revoke` · `audit:read` |
-| **MODERATOR** | global | `users:read` · `posts:moderate` |
-| **AUTHOR** | own | `posts:write` |
-| **VIEWER** | global | `posts:read` |
+| **VIEWER** | global | read-only dashboard/service/toolbox/settings/log views |
 | **USER** | own | self-profile only |
 
 → See [`authorization.py`](./src/coreline_auth/authorization.py) for `ResourceAuthorizer` and scope evaluation (`own` vs `any`).
@@ -738,27 +735,23 @@ uv run python -m coreline_auth.ops_readiness --json
 
 ## 🧪 Self-Test Webapp
 
-A complete SaaS-style demo lives under [`src/coreline_auth/examples/`](./src/coreline_auth/examples/) — a single `uvicorn` command boots a working login/signup/board app exercising every primitive in the module.
+A complete SaaS-style auth demo lives under [`src/coreline_auth/examples/`](./src/coreline_auth/examples/) — a single `uvicorn` command boots a working login/signup/account/admin/system app exercising the auth primitives in this module.
 
 ```bash
 make run-demo                # http://127.0.0.1:8010/login
 make smoke-demo              # pytest-only smoke
+make run-demo-board          # http://127.0.0.1:8011/demo-board
+make smoke-demo-board        # repo-local board RBAC demo smoke
 make smoke-demo-secure       # production-mode smoke (CSRF + demo-off + audit redaction)
 make readiness-check          # secret-safe production readiness config check
 ```
 
-Demo mode seeds representative users so every permission path can be tested
-without editing the database. The password is shared only in demo mode:
+Demo mode provides a recoverable local admin account. The password is shown only in demo mode:
 
 | Role | Example account | What to verify |
 |---|---|---|
 | Admin login | `owner@example.com` / `coreline-demo-password` | Admin dashboard, audit, system, user lifecycle |
-| OWNER | `owner-board@example.com` / `coreline-demo-password` | Full board ownership permissions |
-| ADMIN | `admin-board@example.com` / `coreline-demo-password` | Board-wide management paths |
-| MODERATOR | `moderator-board@example.com` / `coreline-demo-password` | Moderate posts/comments without user admin |
-| AUTHOR | `author-board@example.com` / `coreline-demo-password` | Own post/comment create/edit/delete |
-| USER | `user-board@example.com` / `coreline-demo-password` | Basic board participation |
-| VIEWER | `viewer-board@example.com` / `coreline-demo-password` | Read-only board and styled 403 for admin/system routes |
+| Signup user | created from `/signup` | Account center, password change, own sessions/activity, non-admin 403 |
 
 <table>
 <tr><th>Flow</th><th>Endpoint</th><th>Notes</th></tr>
@@ -768,12 +761,31 @@ without editing the database. The password is shared only in demo mode:
 <tr><td>Password reset</td><td><code>/password-reset/request</code> · <code>/password-reset/consume</code></td><td>Revokes sessions on success</td></tr>
 <tr><td>Social login</td><td><code>/social/{provider}/start</code> · <code>/callback</code></td><td>Dev connector when credentials absent</td></tr>
 <tr><td>Account self-service</td><td><code>/account</code> · <code>/account/security</code> · <code>/account/sessions</code> · <code>/account/activity</code></td><td>Profile, password change, MFA status, self session revoke, personal activity</td></tr>
-<tr><td>Board (RBAC + ownership)</td><td><code>/board</code></td><td>Persistent SQLite + author scope</td></tr>
 <tr><td>Admin dashboard</td><td><code>/admin</code> · <code>/admin/users/{id}</code></td><td>Role/status distribution, user detail, disable/enable, password set, session revoke</td></tr>
 <tr><td>Audit viewer</td><td><code>/admin/audit</code></td><td>Requires <code>audit:read</code>; action/actor/target/time range filters</td></tr>
 <tr><td>System health</td><td><code>/system</code></td><td>Storage health, provider readiness, runbook card</td></tr>
 <tr><td>Email outbox</td><td><code>/system/email</code></td><td>Dev sender queue + template preview without external SMTP</td></tr>
 </table>
+
+The board RBAC self-test is a separate checkout-only demo under [`demos/board_rbac/`](./demos/board_rbac/). It is intentionally outside `src/coreline_auth`, is not included in the package wheel, and runs as a standalone app:
+
+```bash
+make run-demo-board          # http://127.0.0.1:8011/demo-board
+make smoke-demo-board        # tests/demos only
+```
+
+Board demo accounts keep the previous selectable role test flow:
+
+| Board role | Example account | What to verify |
+|---|---|---|
+| owner | `owner-board@example.com` / `coreline-demo-password` | Full board management |
+| admin | `admin-board@example.com` / `coreline-demo-password` | Full board management |
+| moderator | `moderator-board@example.com` / `coreline-demo-password` | Manage any post/comment through demo-local board role mapping |
+| author | `author-board@example.com` / `coreline-demo-password` | Create posts and manage own content |
+| user | `user-board@example.com` / `coreline-demo-password` | Create posts/comments, no edit/delete ownership grant |
+| viewer | `viewer-board@example.com` / `coreline-demo-password` | Read-only board access |
+
+`make run-demo` remains auth-only. If a combined auth + board composition is needed later, add it as a separate composition app rather than importing board code from `src/coreline_auth/examples/saas_app.py`. The previous local sibling folders `packages/coreline-board` and `packages/coreline-board-saas` have been removed from this checkout after the demo migration; the auth repo demo is now the source of truth for this self-test fixture.
 
 → Full guide: [`docs/self-test-webapp.md`](./docs/self-test-webapp.md)<br/>
 → Ops readiness: [`docs/ops-readiness.md`](./docs/ops-readiness.md)
@@ -813,7 +825,7 @@ without editing the database. The password is shared only in demo mode:
 </tr>
 </table>
 
-#### 🏠 Application & Board (RBAC)
+#### 🏠 Auth application surfaces
 
 <table>
 <tr>
@@ -822,14 +834,8 @@ without editing the database. The password is shared only in demo mode:
 <br/><sub><b>🏠 Dashboard</b> · <code>/</code> — Current session, role, permissions overview</sub>
 </td>
 <td width="50%" align="center">
-<a href="./docs/screenshots/07-board-list.png"><img src="./docs/screenshots/07-board-list.png" alt="Board list" width="100%"/></a>
-<br/><sub><b>📋 Board (RBAC + ownership)</b> · <code>/board</code> — Persistent SQLite + author/moderator scope</sub>
-</td>
-</tr>
-<tr>
-<td width="50%" align="center" colspan="2">
-<a href="./docs/screenshots/08-board-new.png"><img src="./docs/screenshots/08-board-new.png" alt="New post" width="50%"/></a>
-<br/><sub><b>✍️ New Post</b> · <code>/board/new</code> — Permission-gated write with CSRF token</sub>
+<a href="./docs/screenshots/09-admin.png"><img src="./docs/screenshots/09-admin.png" alt="Admin" width="100%"/></a>
+<br/><sub><b>🛡️ Admin</b> · <code>/admin</code> — User lifecycle, audit and system readiness</sub>
 </td>
 </tr>
 </table>
@@ -903,7 +909,7 @@ without editing the database. The password is shared only in demo mode:
 ```bash
 cd packages/coreline-auth
 
-# Full test suite (149 tests, ~17s)
+# Full test suite
 make test
 
 # Direct invocations
@@ -911,7 +917,10 @@ uv run pytest -q
 uv run python -c "import coreline_auth"
 
 # Independence guard
-! grep -RIn "CoreMCP\|coremcp" src/coreline_auth
+make import-guard
+
+# Board RBAC demo smoke
+make smoke-demo-board
 
 # Secret leak guard
 make secret-grep
@@ -935,6 +944,7 @@ make postgres-docker-smoke
 | `test_postgres_storage.py` | SQLAlchemy async + Alembic |
 | `test_release_blockers_r5.py` | **R5 regression** — AAL2 round-trip + concurrent consume races |
 | `test_demo_webapp.py` | SaaS demo flows — account/admin/system/email/dashboard UX |
+| `tests/demos/` | Checkout-only board RBAC demo — account selector, role matrix, CSRF/open-redirect guards |
 | `test_demo_config.py` | Demo config safety defaults |
 | `test_ops_readiness.py` | Secret-safe readiness CLI/output |
 
@@ -944,7 +954,7 @@ make postgres-docker-smoke
 
 | Version | Status | Highlights |
 |---|---|---|
-| **v0.4** | ✅ Shipped | Initial core + RBAC board demo + admin/OIDC/MFA groundwork |
+| **v0.4** | ✅ Shipped | Initial core + RBAC/admin/OIDC/MFA groundwork |
 | **v0.5.0-rc1** | ✅ Shipped | CSRF · OIDC `azp/nbf/max_age` · TOTP/AAL2 · audit redaction · production hardening |
 | **v0.5.0-rc2** | 🟡 Current | Account center · admin user detail · system/email console · readiness CLI · async hardening |
 | **v0.5.0 GA** | 🔜 Next | External SMTP/OAuth/Postgres/Redis/WebAuthn smoke + docs polish |

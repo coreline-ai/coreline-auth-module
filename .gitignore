@@ -4,3 +4,7 @@ __pycache__/
 *.py[cod]
 .coreline-auth-demo/
 *.sqlite3
+
+# Local editor/OS files
+.DS_Store
+.vscode/

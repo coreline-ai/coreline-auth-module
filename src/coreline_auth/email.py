@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import smtplib
 import ssl
+from html import escape as html_escape
 from dataclasses import dataclass
 from email.message import EmailMessage
 from string import Template
 from typing import Protocol
+from urllib.parse import quote, urlencode
+
+from .errors import AuthValidationError
+from .security import normalize_email_address
 
 
 class EmailSender(Protocol):
@@ -56,22 +61,26 @@ class RenderedEmail:
     html_body: str | None = None
 
 
+def _auth_url(base_url: str, path: str, params: dict[str, str]) -> str:
+    return f"{base_url}{path}?{urlencode(params)}"
+
+
 @dataclass(frozen=True, slots=True)
 class EmailTemplateSet:
     magic_link: EmailTemplate = EmailTemplate(
         subject="Your Coreline sign-in link",
-        text_body="Use this link to sign in: ${base_url}/magic-link/consume?token=${token}&return_to=${return_to}\n\nIf you did not request this, ignore this email.",
-        html_body="<p>Use this link to sign in:</p><p><a href='${base_url}/magic-link/consume?token=${token}&return_to=${return_to}'>Sign in</a></p><p>If you did not request this, ignore this email.</p>",
+        text_body="Use this link to sign in: ${magic_link_url}\n\nIf you did not request this, ignore this email.",
+        html_body="<p>Use this link to sign in:</p><p><a href='${magic_link_url_html}'>Sign in</a></p><p>If you did not request this, ignore this email.</p>",
     )
     email_verification: EmailTemplate = EmailTemplate(
         subject="Verify your Coreline email",
-        text_body="Verify your email: ${base_url}/email-verification/consume?token=${token}\n\nIf you did not create an account, ignore this email.",
-        html_body="<p>Verify your email:</p><p><a href='${base_url}/email-verification/consume?token=${token}'>Verify email</a></p><p>If you did not create an account, ignore this email.</p>",
+        text_body="Verify your email: ${email_verification_url}\n\nIf you did not create an account, ignore this email.",
+        html_body="<p>Verify your email:</p><p><a href='${email_verification_url_html}'>Verify email</a></p><p>If you did not create an account, ignore this email.</p>",
     )
     password_reset: EmailTemplate = EmailTemplate(
         subject="Reset your Coreline password",
-        text_body="Reset your password: ${base_url}/password-reset/consume?token=${token}\n\nIf you did not request this, ignore this email.",
-        html_body="<p>Reset your password:</p><p><a href='${base_url}/password-reset/consume?token=${token}'>Reset password</a></p><p>If you did not request this, ignore this email.</p>",
+        text_body="Reset your password: ${password_reset_url}\n\nIf you did not request this, ignore this email.",
+        html_body="<p>Reset your password:</p><p><a href='${password_reset_url_html}'>Reset password</a></p><p>If you did not request this, ignore this email.</p>",
     )
 
 
@@ -117,7 +126,11 @@ class SmtpEmailSender:
     ) -> None:
         if not host:
             raise ValueError("SMTP host is required")
-        if not from_email or "@" not in from_email:
+        try:
+            normalized_from_email = normalize_email_address(from_email)
+        except AuthValidationError as exc:
+            raise ValueError("valid from_email is required") from exc
+        if not normalized_from_email:
             raise ValueError("valid from_email is required")
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("base_url must be an absolute http(s) URL")
@@ -125,7 +138,7 @@ class SmtpEmailSender:
         self.port = port
         self.username = username
         self.password = password
-        self.from_email = from_email
+        self.from_email = normalized_from_email
         self.base_url = base_url.rstrip("/")
         self.use_tls = use_tls
         self.use_ssl = use_ssl
@@ -134,21 +147,46 @@ class SmtpEmailSender:
         self.ssl_context = ssl_context or ssl.create_default_context()
 
     def send_magic_link(self, *, email: str, token: str, return_to: str) -> None:
-        rendered = self.templates.magic_link.render(base_url=self.base_url, token=token, return_to=return_to)
+        magic_link_url = _auth_url(self.base_url, "/magic-link/consume", {"token": token, "return_to": return_to})
+        rendered = self.templates.magic_link.render(
+            base_url=self.base_url,
+            token=token,
+            token_html=html_escape(token, quote=True),
+            return_to=return_to,
+            return_to_url=quote(return_to, safe=""),
+            return_to_html=html_escape(return_to, quote=True),
+            magic_link_url=magic_link_url,
+            magic_link_url_html=html_escape(magic_link_url, quote=True),
+        )
         self._send(email=email, rendered=rendered)
 
     def send_email_verification(self, *, email: str, token: str) -> None:
-        rendered = self.templates.email_verification.render(base_url=self.base_url, token=token)
+        email_verification_url = _auth_url(self.base_url, "/email-verification/consume", {"token": token})
+        rendered = self.templates.email_verification.render(
+            base_url=self.base_url,
+            token=token,
+            token_html=html_escape(token, quote=True),
+            email_verification_url=email_verification_url,
+            email_verification_url_html=html_escape(email_verification_url, quote=True),
+        )
         self._send(email=email, rendered=rendered)
 
     def send_password_reset(self, *, email: str, token: str) -> None:
-        rendered = self.templates.password_reset.render(base_url=self.base_url, token=token)
+        password_reset_url = _auth_url(self.base_url, "/password-reset/consume", {"token": token})
+        rendered = self.templates.password_reset.render(
+            base_url=self.base_url,
+            token=token,
+            token_html=html_escape(token, quote=True),
+            password_reset_url=password_reset_url,
+            password_reset_url_html=html_escape(password_reset_url, quote=True),
+        )
         self._send(email=email, rendered=rendered)
 
     def _send(self, *, email: str, rendered: RenderedEmail) -> None:
+        to_email = normalize_email_address(email)
         message = EmailMessage()
         message["From"] = self.from_email
-        message["To"] = email
+        message["To"] = to_email
         message["Subject"] = rendered.subject
         message.set_content(rendered.text_body)
         if rendered.html_body is not None:

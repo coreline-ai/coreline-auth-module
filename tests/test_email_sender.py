@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from coreline_auth import EmailTemplate, EmailTemplateSet, SmtpEmailSender
+import pytest
+
+from coreline_auth import AuthValidationError, EmailTemplate, EmailTemplateSet, SmtpEmailSender
 
 
 class FakeSMTP:
@@ -59,6 +61,40 @@ def test_smtp_sender_sends_magic_link_with_templates(monkeypatch) -> None:
     assert message["To"] == "user@example.com"
     assert message["Subject"] == "Sign in"
     assert "Token=raw-dev-token Return=/dashboard" in message.get_content()
+
+
+def test_smtp_sender_rejects_invalid_sender_and_recipient(monkeypatch) -> None:
+    FakeSMTP.sent_messages.clear()
+    FakeSMTP.calls.clear()
+    monkeypatch.setattr("coreline_auth.email.smtplib.SMTP", FakeSMTP)
+
+    with pytest.raises(ValueError):
+        SmtpEmailSender(host="smtp.example.com", from_email="auth\r\n@example.com", base_url="https://auth.example.com")
+
+    sender = SmtpEmailSender(host="smtp.example.com", from_email="AUTH@EXAMPLE.COM", base_url="https://auth.example.com", use_tls=False)
+    with pytest.raises(AuthValidationError):
+        sender.send_magic_link(email="victim@example.com\r\nBcc: attacker@example.com", token="raw-dev-token", return_to="/dashboard")
+    assert FakeSMTP.sent_messages == []
+    assert sender.from_email == "auth@example.com"
+
+
+def test_smtp_sender_default_magic_link_template_url_and_html_escape_return_to(monkeypatch) -> None:
+    FakeSMTP.sent_messages.clear()
+    FakeSMTP.calls.clear()
+    monkeypatch.setattr("coreline_auth.email.smtplib.SMTP", FakeSMTP)
+
+    sender = SmtpEmailSender(host="smtp.example.com", from_email="auth@example.com", base_url="https://auth.example.com", use_tls=False)
+    sender.send_magic_link(email="user@example.com", token="dev-token", return_to="/dashboard?next=/' onclick='alert(1)&x=<tag>")
+
+    message = FakeSMTP.sent_messages[-1]
+    text = message.get_body(preferencelist=("plain",)).get_content()
+    html = message.get_body(preferencelist=("html",)).get_content()
+
+    assert "%27+onclick%3D%27alert%281%29" in text
+    assert "%3Ctag%3E" in text
+    assert "&amp;return_to=" in html
+    assert "' onclick='" not in html
+    assert "<tag>" not in html
 
 
 class FakeSMTPSSL(FakeSMTP):

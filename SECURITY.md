@@ -127,7 +127,7 @@ For local HTTP development, explicitly configure development settings rather tha
 
 ## Demo App Safety Notes
 
-The included SaaS demo app is intended for local validation of login, signup, social login simulation, admin controls, audit viewer, and board RBAC flows.
+The included SaaS demo app is intended for local validation of login, signup, social login simulation, admin controls, audit viewer, account self-service, system readiness, and email outbox flows.
 
 Demo-specific behavior is **not** a production recommendation:
 

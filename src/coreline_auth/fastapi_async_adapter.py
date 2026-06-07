@@ -60,11 +60,13 @@ def mount_async_auth_routes(
             return None
         return hash_secret(session_token)
 
-    async def require_csrf(request: Request) -> None:
-        if csrf_protector is None:
-            return
+    async def require_csrf(request: Request, *, cookie_auth_required: bool = False) -> None:
         authorization = request.headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):
+            return
+        if csrf_protector is None:
+            if cookie_auth_required and request.cookies.get(cookie_name):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="csrf protection is required for cookie-authenticated requests")
             return
         header_token = request.headers.get(csrf_header_name)
         cookie_token = request.cookies.get(csrf_cookie_name)
@@ -122,7 +124,7 @@ def mount_async_auth_routes(
 
     @router.post("/logout")
     async def logout(request: Request, response: Response, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, bool]:
-        await require_csrf(request)
+        await require_csrf(request, cookie_auth_required=True)
         token = token_from_request(request, credentials, cookie_name)
         if token:
             await auth.logout(token)

@@ -37,4 +37,4 @@ packages = ["src/coreline_auth"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = [".", "src"]

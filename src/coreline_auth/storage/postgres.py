@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import and_, case, delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
@@ -225,14 +225,41 @@ class AsyncPostgresAuthStorage:
         values = {
             "expires_at": session.expires_at,
             "idle_expires_at": session.idle_expires_at,
-            "revoked_at": session.revoked_at,
+            # Revocation and AAL upgrades are monotonic security state. A stale
+            # caller must never clear revocation or downgrade an AAL2 session.
+            "revoked_at": func.coalesce(auth_sessions.c.revoked_at, session.revoked_at),
             "last_seen_at": session.last_seen_at,
-            "assurance_level": session.assurance_level.value,
+            "assurance_level": case(
+                (auth_sessions.c.assurance_level == AuthAssuranceLevel.AAL2.value, auth_sessions.c.assurance_level),
+                else_=session.assurance_level.value,
+            ),
         }
         async with self.sessionmaker.begin() as db_session:
             result = await db_session.execute(update(auth_sessions).where(auth_sessions.c.id == session.id).values(**values))
         if result.rowcount == 0:
             raise AuthValidationError("session not found")
+
+    async def touch_session(self, session_id: str, *, last_seen_at: datetime, idle_expires_at: datetime | None) -> AuthSession | None:
+        stmt = (
+            update(auth_sessions)
+            .where(auth_sessions.c.id == session_id, auth_sessions.c.revoked_at.is_(None))
+            .values(last_seen_at=last_seen_at, idle_expires_at=idle_expires_at)
+            .returning(auth_sessions)
+        )
+        async with self.sessionmaker.begin() as session:
+            row = (await session.execute(stmt)).mappings().first()
+        return self._session_from_row(row) if row else None
+
+    async def set_session_assurance_level(self, session_id: str, *, assurance_level: AuthAssuranceLevel, last_seen_at: datetime) -> AuthSession | None:
+        stmt = (
+            update(auth_sessions)
+            .where(auth_sessions.c.id == session_id, auth_sessions.c.revoked_at.is_(None))
+            .values(assurance_level=assurance_level.value, last_seen_at=last_seen_at)
+            .returning(auth_sessions)
+        )
+        async with self.sessionmaker.begin() as session:
+            row = (await session.execute(stmt)).mappings().first()
+        return self._session_from_row(row) if row else None
 
     async def revoke_session(self, session_id: str) -> None:
         async with self.sessionmaker.begin() as session:
@@ -297,6 +324,17 @@ class AsyncPostgresAuthStorage:
             result = await session.execute(update(auth_mfa_factors).where(auth_mfa_factors.c.id == factor.id).values(**self._mfa_factor_values(factor)))
         if result.rowcount == 0:
             raise AuthValidationError("mfa factor not found")
+
+    async def mark_mfa_factor_counter_used(self, factor_id: str, *, counter: int, used_at: datetime) -> AuthMfaFactor | None:
+        stmt = (
+            update(auth_mfa_factors)
+            .where(auth_mfa_factors.c.id == factor_id, or_(auth_mfa_factors.c.last_used_counter.is_(None), auth_mfa_factors.c.last_used_counter < counter))
+            .values(last_used_at=used_at, last_used_counter=counter)
+            .returning(auth_mfa_factors)
+        )
+        async with self.sessionmaker.begin() as session:
+            row = (await session.execute(stmt)).mappings().first()
+        return self._mfa_factor_from_row(row) if row else None
 
     async def create_recovery_code(self, code: AuthRecoveryCode) -> AuthRecoveryCode:
         async with self.sessionmaker.begin() as session:

@@ -31,7 +31,8 @@ class CorelineAdminService:
             self._require_another_active_privileged_user(user.id)
         updated = replace(user, role=role, updated_at=now_utc())
         self.auth.storage.update_user(updated)
-        self.auth._audit("auth.admin.role_update", actor_user_id=actor.user_id, target_user_id=user.id, metadata={"role": role.value})
+        revoked = self.auth.storage.revoke_sessions_for_user(user.id)
+        self.auth._audit("auth.admin.role_update", actor_user_id=actor.user_id, target_user_id=user.id, metadata={"role": role.value, "revoked_count": revoked})
         return updated
 
     def ban_user(self, *, actor_session_token: str, user_id: str, reason: str | None = None) -> AuthUser:
@@ -77,7 +78,7 @@ class CorelineAdminService:
 
     def set_user_password(self, *, actor_session_token: str, user_id: str, password: str) -> AuthCredential:
         actor = self.auth.verify_session(actor_session_token, required_permission="users:write")
-        credential = self.auth.set_password(user_id, password)
+        credential = self.auth.set_password(user_id, password, revoke_sessions=False)
         if self.auth.config.revoke_sessions_on_password_change:
             revoked = self.auth.storage.revoke_sessions_for_user(user_id)
             self.auth._audit("auth.admin.password_set.sessions_revoked", actor_user_id=actor.user_id, target_user_id=user_id, metadata={"revoked_count": revoked})

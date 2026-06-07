@@ -65,6 +65,14 @@ class AuthorizationContext:
 
 @dataclass(frozen=True, slots=True)
 class ResourceAuthorizer:
+    """Evaluate resource/action permissions.
+
+    When ``scope`` is omitted, resource/action checks keep the legacy
+    ownership-aware expansion: an owned resource can satisfy unscoped checks
+    with ``:own`` or ``:any`` grants. Pass ``scope=OWN_SCOPE`` or
+    ``scope=ANY_SCOPE`` to make the required scope explicit.
+    """
+
     policy: PolicyEngine = field(default_factory=lambda: PolicyEngine(profile=AuthProfile.RBAC))
 
     def can(
@@ -74,9 +82,10 @@ class ResourceAuthorizer:
         *,
         resource: str | None = None,
         action: str | None = None,
+        scope: str | None = None,
         context: AuthorizationContext | None = None,
     ) -> PermissionDecision:
-        statement = self._required_statement(required=required, resource=resource, action=action)
+        statement = self._required_statement(required=required, resource=resource, action=action, scope=scope)
         ctx = context or AuthorizationContext()
         effective_permissions = tuple(permissions or ())
         if not effective_permissions and ctx.actor_role is not None:
@@ -105,9 +114,10 @@ class ResourceAuthorizer:
         *,
         resource: str | None = None,
         action: str | None = None,
+        scope: str | None = None,
         context: AuthorizationContext | None = None,
     ) -> PermissionDecision:
-        decision = self.can(permissions, required=required, resource=resource, action=action, context=context)
+        decision = self.can(permissions, required=required, resource=resource, action=action, scope=scope, context=context)
         if not decision.allowed:
             raise AuthorizationDenied(decision.reason)
         return decision
@@ -118,16 +128,19 @@ class ResourceAuthorizer:
         *,
         resource: str,
         action: str,
+        scope: str | None = None,
         context: AuthorizationContext | None = None,
     ) -> PermissionDecision:
-        return self.can(permissions, resource=resource, action=action, context=context)
+        return self.can(permissions, resource=resource, action=action, scope=scope, context=context)
 
-    def _required_statement(self, *, required: str | None, resource: str | None, action: str | None) -> PermissionStatement:
+    def _required_statement(self, *, required: str | None, resource: str | None, action: str | None, scope: str | None) -> PermissionStatement:
         if required is not None:
+            if scope is not None:
+                raise ValueError("scope cannot be combined with a required permission string")
             return PermissionStatement.parse(required)
         if not resource or not action:
             raise ValueError("required permission or resource/action must be provided")
-        return PermissionStatement(resource=resource, action=action)
+        return PermissionStatement(resource=resource, action=action, scope=scope)
 
     def _candidate_requirements(self, statement: PermissionStatement, context: AuthorizationContext) -> tuple[str, ...]:
         if statement.scope == ANY_SCOPE:

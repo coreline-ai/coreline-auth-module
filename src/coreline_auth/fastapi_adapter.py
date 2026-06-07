@@ -92,11 +92,13 @@ def mount_auth_routes(
             return None
         return hash_secret(session_token)
 
-    def require_csrf(request: Request) -> None:
-        if csrf_protector is None:
-            return
+    def require_csrf(request: Request, *, cookie_auth_required: bool = False) -> None:
         authorization = request.headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):
+            return
+        if csrf_protector is None:
+            if cookie_auth_required and request.cookies.get(cookie_name):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="csrf protection is required for cookie-authenticated requests")
             return
         header_token = request.headers.get(csrf_header_name)
         cookie_token = request.cookies.get(csrf_cookie_name)
@@ -198,7 +200,7 @@ def mount_auth_routes(
 
     @router.post("/logout")
     def logout(request: Request, response: Response, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, bool]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = token_from_request(request, credentials, cookie_name)
         if token:
             auth.logout(token)
@@ -247,7 +249,7 @@ def require_permission(auth: CorelineAuthService, permission: str, *, cookie_nam
 
 
 class AdminRoleRequest(BaseModel):
-    role: str = Field(pattern="^(owner|admin|moderator|author|viewer|user)$")
+    role: str = Field(pattern="^(owner|admin|viewer|user)$")
 
 
 class AdminPasswordRequest(BaseModel):
@@ -293,11 +295,13 @@ def mount_admin_routes(
             return None
         return hash_secret(session_token)
 
-    def require_csrf(request: Request) -> None:
-        if csrf_protector is None:
-            return
+    def require_csrf(request: Request, *, cookie_auth_required: bool = False) -> None:
         authorization = request.headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):
+            return
+        if csrf_protector is None:
+            if cookie_auth_required and request.cookies.get(cookie_name):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="csrf protection is required for cookie-authenticated requests")
             return
         header_token = request.headers.get(csrf_header_name)
         cookie_token = request.cookies.get(csrf_cookie_name)
@@ -369,7 +373,7 @@ def mount_admin_routes(
 
     @router.post("/users/{user_id}/role")
     def update_role(user_id: str, payload: AdminRoleRequest, request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, object]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = require_token(request, credentials)
         try:
             user = admin.update_user_role(actor_session_token=token, user_id=user_id, role=Role(payload.role))
@@ -379,7 +383,7 @@ def mount_admin_routes(
 
     @router.post("/users/{user_id}/ban")
     def ban_user(user_id: str, request: Request, payload: AdminReasonRequest | None = None, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, object]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = require_token(request, credentials)
         try:
             user = admin.ban_user(actor_session_token=token, user_id=user_id, reason=payload.reason if payload else None)
@@ -389,7 +393,7 @@ def mount_admin_routes(
 
     @router.post("/users/{user_id}/unban")
     def unban_user(user_id: str, request: Request, payload: AdminReasonRequest | None = None, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, object]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = require_token(request, credentials)
         try:
             user = admin.unban_user(actor_session_token=token, user_id=user_id, reason=payload.reason if payload else None)
@@ -399,7 +403,7 @@ def mount_admin_routes(
 
     @router.post("/users/{user_id}/password")
     def set_password(user_id: str, payload: AdminPasswordRequest, request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, bool]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = require_token(request, credentials)
         try:
             admin.set_user_password(actor_session_token=token, user_id=user_id, password=payload.password)
@@ -432,7 +436,7 @@ def mount_admin_routes(
 
     @router.post("/sessions/{session_id}/revoke")
     def revoke_session(session_id: str, request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None) -> dict[str, bool]:
-        require_csrf(request)
+        require_csrf(request, cookie_auth_required=True)
         token = require_token(request, credentials)
         try:
             admin.revoke_session(actor_session_token=token, session_id=session_id)

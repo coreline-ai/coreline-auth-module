@@ -13,6 +13,7 @@ from coreline_auth import (
     CorelineAuthConfig,
     CorelineAuthService,
     InMemoryEmailSender,
+    InMemoryMfaSecretVault,
     Role,
     totp_code,
 )
@@ -32,7 +33,11 @@ class FailingEmailSender(InMemoryEmailSender):
 
 
 def _rbac_service(storage) -> CorelineAuthService:
-    return CorelineAuthService(storage=storage, config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False))
+    return CorelineAuthService(
+        storage=storage,
+        config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False, allow_insecure_mfa_vault=True),
+        mfa_secret_vault=InMemoryMfaSecretVault(),
+    )
 
 
 def test_sqlite_aal2_survives_db_roundtrip(tmp_path: Path) -> None:
@@ -140,6 +145,33 @@ def test_totp_code_replay_in_same_window_is_rejected() -> None:
 
     with pytest.raises(AuthenticationFailed):
         service.step_up_totp(issued.token, code=code)
+
+
+def test_sqlite_totp_concurrent_step_up_allows_exactly_one_success(tmp_path: Path) -> None:
+    storage = SQLiteAuthStorage(tmp_path / "auth.sqlite3")
+    try:
+        service = _rbac_service(storage)
+        user = service.create_user(email="user@example.com", role=Role.USER, password="correct horse battery", email_verified=True)
+        issued = service.login_password(email="user@example.com", password="correct horse battery")
+        factor, secret = service.begin_totp_enrollment(user.id)
+        service.verify_totp_enrollment(user_id=user.id, factor_id=factor.id, code=totp_code(secret))
+        code = totp_code(secret)
+        barrier = Barrier(2)
+
+        def step_up() -> bool:
+            barrier.wait()
+            try:
+                service.step_up_totp(issued.token, code=code)
+                return True
+            except AuthenticationFailed:
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: step_up(), range(2)))
+
+        assert sorted(results) == [False, True]
+    finally:
+        storage.close()
 
 
 def test_audit_write_failure_is_best_effort() -> None:

@@ -7,7 +7,7 @@ from datetime import datetime
 import threading
 
 from coreline_auth.errors import AuthValidationError
-from coreline_auth.models import AuditEvent, AuthCredential, AuthIdentity, AuthMfaFactor, AuthRecoveryCode, AuthSession, AuthUser, FlowType, LoginFlow, Role, UserStatus, now_utc
+from coreline_auth.models import AuditEvent, AuthAssuranceLevel, AuthCredential, AuthIdentity, AuthMfaFactor, AuthRecoveryCode, AuthSession, AuthUser, FlowType, LoginFlow, Role, UserStatus, now_utc
 
 
 def _email_key(email: str) -> str:
@@ -141,10 +141,41 @@ class MemoryAuthStorage:
         return sorted((session for session in self.sessions.values() if session.user_id == user_id), key=lambda session: session.created_at)
 
     def update_session(self, session: AuthSession) -> None:
-        if session.id not in self.sessions:
-            raise AuthValidationError("session not found")
-        self.sessions[session.id] = session
-        self.sessions_by_token_hash[session.session_token_hash] = session.id
+        with self._lock:
+            existing = self.sessions.get(session.id)
+            if existing is None:
+                raise AuthValidationError("session not found")
+            # Revocation and AAL upgrades are monotonic security state. A stale
+            # caller must never clear revocation or downgrade an AAL2 session.
+            revoked_at = existing.revoked_at or session.revoked_at
+            assurance_level = (
+                AuthAssuranceLevel.AAL2
+                if existing.assurance_level == AuthAssuranceLevel.AAL2 or session.assurance_level == AuthAssuranceLevel.AAL2
+                else session.assurance_level
+            )
+            saved = replace(session, revoked_at=revoked_at, assurance_level=assurance_level)
+            self.sessions[session.id] = saved
+            self.sessions_by_token_hash[session.session_token_hash] = session.id
+
+    def touch_session(self, session_id: str, *, last_seen_at: datetime, idle_expires_at: datetime | None) -> AuthSession | None:
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.revoked_at is not None:
+                return None
+            updated = replace(session, last_seen_at=last_seen_at, idle_expires_at=idle_expires_at)
+            self.sessions[session_id] = updated
+            self.sessions_by_token_hash[updated.session_token_hash] = session_id
+            return updated
+
+    def set_session_assurance_level(self, session_id: str, *, assurance_level: AuthAssuranceLevel, last_seen_at: datetime) -> AuthSession | None:
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.revoked_at is not None:
+                return None
+            updated = replace(session, assurance_level=assurance_level, last_seen_at=last_seen_at)
+            self.sessions[session_id] = updated
+            self.sessions_by_token_hash[updated.session_token_hash] = session_id
+            return updated
 
     def revoke_session(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
@@ -222,6 +253,17 @@ class MemoryAuthStorage:
         if factor.id not in self.mfa_factors:
             raise AuthValidationError("mfa factor not found")
         self.mfa_factors[factor.id] = factor
+
+    def mark_mfa_factor_counter_used(self, factor_id: str, *, counter: int, used_at: datetime) -> AuthMfaFactor | None:
+        with self._lock:
+            factor = self.mfa_factors.get(factor_id)
+            if factor is None:
+                return None
+            if factor.last_used_counter is not None and counter <= factor.last_used_counter:
+                return None
+            updated = replace(factor, last_used_at=used_at, last_used_counter=counter)
+            self.mfa_factors[factor_id] = updated
+            return updated
 
     def create_recovery_code(self, code: AuthRecoveryCode) -> AuthRecoveryCode:
         self.recovery_codes[code.id] = code

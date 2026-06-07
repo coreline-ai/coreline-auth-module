@@ -19,29 +19,14 @@ READ_ONLY_PERMISSIONS: tuple[str, ...] = (
     "settings:read",
     "logs:read",
 )
-RBAC_READ_ONLY_PERMISSIONS: tuple[str, ...] = READ_ONLY_PERMISSIONS + ("board:read",)
-USER_PERMISSIONS: tuple[str, ...] = RBAC_READ_ONLY_PERMISSIONS + (
-    "post:create",
-    "comment:create",
-)
-AUTHOR_PERMISSIONS: tuple[str, ...] = USER_PERMISSIONS + (
-    "post:update:own",
-    "post:delete:own",
-    "comment:delete:own",
-)
-MODERATOR_PERMISSIONS: tuple[str, ...] = RBAC_READ_ONLY_PERMISSIONS + (
-    "users:read",
-    "post:update:any",
-    "post:delete:any",
-    "comment:create",
-    "comment:delete:any",
+USER_PERMISSIONS: tuple[str, ...] = (
+    "profile:read",
+    "dashboard:read",
 )
 RBAC_ROLE_PERMISSIONS: dict[Role, tuple[str, ...]] = {
     Role.OWNER: (ALL_PERMISSIONS,),
     Role.ADMIN: (ALL_PERMISSIONS,),
-    Role.MODERATOR: MODERATOR_PERMISSIONS,
-    Role.AUTHOR: AUTHOR_PERMISSIONS,
-    Role.VIEWER: RBAC_READ_ONLY_PERMISSIONS,
+    Role.VIEWER: READ_ONLY_PERMISSIONS,
     Role.USER: USER_PERMISSIONS,
 }
 
@@ -89,9 +74,7 @@ class PolicyEngine:
             if role == Role.VIEWER:
                 return READ_ONLY_PERMISSIONS
             if role == Role.USER:
-                return ("profile:read", "dashboard:read")
-            if role in {Role.MODERATOR, Role.AUTHOR}:
-                return RBAC_ROLE_PERMISSIONS[role]
+                return USER_PERMISSIONS
             return ()
         if self.profile == AuthProfile.RBAC:
             return RBAC_ROLE_PERMISSIONS.get(role, ())
@@ -111,18 +94,15 @@ def _permission_matches(granted: str, required: str) -> bool:
     except ValueError:
         return False
 
-    if granted_statement.resource == ALL_PERMISSIONS and granted_statement.action == ALL_PERMISSIONS:
-        return True
     if granted_statement.resource not in {ALL_PERMISSIONS, required_statement.resource}:
         return False
-    if granted_statement.action == ALL_PERMISSIONS:
-        return True
-    if granted_statement.action != required_statement.action:
+    if granted_statement.action not in {ALL_PERMISSIONS, required_statement.action}:
         return False
 
-    if granted_statement.scope is None:
-        return True
-    if granted_statement.scope == ALL_PERMISSIONS:
+    # A resource/action wildcard must still honor the grant's scope: a scoped
+    # grant such as "record:*:own" only covers its scope, never the broader
+    # unscoped/any requirements (AUTHZ-001).
+    if granted_statement.scope is None or granted_statement.scope == ALL_PERMISSIONS:
         return True
     if granted_statement.scope == required_statement.scope:
         return True

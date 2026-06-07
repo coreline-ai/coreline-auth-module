@@ -8,10 +8,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .email import EmailSender
-from .errors import AuthenticationFailed, AuthorizationDenied, AuthValidationError
+from .errors import AuthenticationFailed, AuthorizationDenied
 from .models import AuditEvent, AuthUser, AuthProfile, UserStatus, now_utc
 from .observability import MetricSink
 from .rate_limit import RateLimiter
+from .security import normalize_email_address
 from .storage.audit import redact_audit_metadata
 from .storage.base import AuthStorage
 
@@ -56,10 +57,7 @@ class AuthServiceSupport:
             raise AuthorizationDenied("single_owner profile only allows the configured owner")
 
     def normalize_email(self, email: str) -> str:
-        value = email.strip().lower()
-        if not value or "@" not in value or len(value) > 320:
-            raise AuthValidationError("invalid email")
-        return value
+        return normalize_email_address(email)
 
     def send_email_best_effort(self, kind: str, send: Callable[[], object]) -> None:
         try:

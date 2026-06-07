@@ -61,8 +61,6 @@ class AuthProfile(StrEnum):
 class Role(StrEnum):
     OWNER = "owner"
     ADMIN = "admin"
-    MODERATOR = "moderator"
-    AUTHOR = "author"
     VIEWER = "viewer"
     USER = "user"
 

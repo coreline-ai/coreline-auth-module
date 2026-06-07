@@ -18,8 +18,16 @@ class MfaSecretVault(Protocol):
     def load_totp_secret(self, *, factor_id: str) -> str | None: ...
 
 
+class InsecureMfaVaultWarning(UserWarning):
+    """Warns that MFA secrets are being stored in plaintext (development only)."""
+
+
 class InMemoryMfaSecretVault:
-    """Development vault. Production apps should provide an encrypted vault."""
+    """Development vault. Production apps should provide an encrypted vault.
+
+    Stores TOTP secrets in plaintext memory. Never use in production; provide
+    an encrypted vault such as SQLiteMfaSecretVault or RedisMfaSecretVault.
+    """
 
     def __init__(self) -> None:
         self._secrets: dict[str, str] = {}
@@ -35,8 +43,13 @@ def generate_totp_secret() -> str:
     return base64.b32encode(os.urandom(20)).decode("ascii").rstrip("=")
 
 
+# 27 base64url chars * 6 bits/char = 162 bits, meeting the NIST SP 800-63B
+# recommendation of >=160 bits of entropy for recovery codes (REC-01).
+_RECOVERY_CODE_CHARS = 27
+
+
 def generate_recovery_code() -> str:
-    return generate_token()[:20]
+    return generate_token()[:_RECOVERY_CODE_CHARS]
 
 
 def totp_code(secret: str, *, timestamp: int | None = None, period_seconds: int = 30, digits: int = 6) -> str:

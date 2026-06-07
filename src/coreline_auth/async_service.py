@@ -31,7 +31,7 @@ from .models import (
 from .observability import MetricSink
 from .permissions import PolicyEngine
 from .rate_limit import FixedWindowRateLimiter, RateLimiter
-from .security import SafeReturnToPolicy, generate_token, hash_optional_context, hash_password, hash_secret, verify_dummy_password, verify_password
+from .security import SafeReturnToPolicy, generate_token, hash_optional_context, hash_password, hash_secret, normalize_email_address, verify_dummy_password, verify_password
 from .service import CorelineAuthConfig
 from .storage.async_base import AsyncAuthStorage
 from .storage.audit import redact_audit_metadata
@@ -74,7 +74,7 @@ class AsyncCorelineAuthService:
         existing = await self.storage.get_user_by_email(normalized)
         if existing is not None:
             if password:
-                await self.set_password(existing.id, password)
+                await self.set_password(existing.id, password, revoke_sessions=False)
             return existing
         user = await self.create_user(email=normalized, role=Role.OWNER, password=password, email_verified=True, display_name=display_name)
         await self._audit("auth.owner.bootstrap", target_user_id=user.id)
@@ -90,16 +90,20 @@ class AsyncCorelineAuthService:
         created = await self.storage.create_user(user)
         await self.storage.upsert_identity(AuthIdentity(id=f"idn_{uuid4().hex}", user_id=created.id, provider="email", provider_subject=normalized_email, email=normalized_email, email_verified=email_verified))
         if password:
-            await self.set_password(created.id, password)
+            await self.set_password(created.id, password, revoke_sessions=False)
         await self._audit("auth.user.create", target_user_id=created.id, metadata={"role": role.value})
         return created
 
-    async def set_password(self, user_id: str, password: str) -> AuthCredential:
+    async def set_password(self, user_id: str, password: str, *, revoke_sessions: bool | None = None, except_session_id: str | None = None) -> AuthCredential:
         user = await self._require_user(user_id)
         existing = await self.storage.get_password_credential(user.id)
         credential = replace(existing, password_hash=hash_password(password), updated_at=now_utc(), revoked_at=None) if existing else AuthCredential(id=f"cred_{uuid4().hex}", user_id=user.id, credential_type=CredentialType.PASSWORD, password_hash=hash_password(password))
         saved = await self.storage.upsert_credential(credential)
         await self._audit("auth.password.set", target_user_id=user.id)
+        should_revoke = self.config.revoke_sessions_on_password_change if revoke_sessions is None else revoke_sessions
+        if should_revoke:
+            revoked = await self.storage.revoke_sessions_for_user(user.id, except_session_id=except_session_id)
+            await self._audit("auth.password.sessions_revoked", target_user_id=user.id, metadata={"revoked_count": revoked})
         return saved
 
     async def login_password(self, *, email: str, password: str, context: RequestContext | None = None) -> IssuedSession:
@@ -155,6 +159,89 @@ class AsyncCorelineAuthService:
         await self._audit("auth.magic_link.consume", target_user_id=user.id)
         return issued
 
+    async def request_email_verification(self, user_id: str | None = None, email: str | None = None) -> MagicLinkChallenge:
+        if (user_id is None) == (email is None):
+            raise AuthValidationError("provide exactly one of user_id or email")
+        user = await self._require_user(user_id) if user_id is not None else await self.storage.get_user_by_email(self._normalize_email(email or ""))
+        if user is None:
+            raise AuthenticationFailed("user not found")
+        if user.status != UserStatus.ACTIVE:
+            raise AuthenticationFailed("user inactive")
+        if self.config.profile == AuthProfile.SINGLE_OWNER:
+            self._assert_owner_email(user.primary_email)
+        self._check_rate_limit(f"email_verify:{hash_secret(user.primary_email)}", limit=self.config.magic_link_limit_per_minute)
+        token = generate_token()
+        now = now_utc()
+        flow = LoginFlow(id=f"flow_{uuid4().hex}", flow_type=FlowType.EMAIL_VERIFICATION, provider="email", state_hash=hash_secret(token), email=user.primary_email, return_to="/", created_at=now, expires_at=now + timedelta(seconds=self.config.login_flow_ttl_seconds), metadata={"user_id": user.id})
+        saved = await self.storage.create_login_flow(flow)
+        if self.email_sender is not None:
+            self._send_email_best_effort("email_verification", lambda: self.email_sender.send_email_verification(email=user.primary_email, token=token))
+        await self._audit("auth.email_verification.request", target_user_id=user.id, metadata={"email_hash": hash_secret(user.primary_email)})
+        return MagicLinkChallenge(token=token, flow=saved)
+
+    async def consume_email_verification(self, token: str) -> AuthUser:
+        now = now_utc()
+        # Single-use is guaranteed atomically by the storage layer's conditional
+        # consume (UPDATE ... WHERE consumed_at IS NULL ... RETURNING), so racing
+        # consumers are safe without bumping the transaction isolation level.
+        flow = await self.storage.consume_login_flow_by_state_hash(hash_secret(token), flow_type=FlowType.EMAIL_VERIFICATION, provider="email", now=now)
+        if flow is None:
+            raise AuthenticationFailed("invalid or expired email verification token")
+        user_id = flow.metadata.get("user_id")
+        user = await self.storage.get_user(user_id) if isinstance(user_id, str) else None
+        if user is None and flow.email:
+            user = await self.storage.get_user_by_email(flow.email)
+        if user is None or user.status != UserStatus.ACTIVE:
+            raise AuthenticationFailed("invalid email verification token")
+        if flow.email and self._normalize_email(user.primary_email) != self._normalize_email(flow.email):
+            raise AuthenticationFailed("invalid email verification token")
+        updated = replace(user, primary_email_verified=True, updated_at=now)
+        await self.storage.update_user(updated)
+        identity = await self.storage.get_identity("email", updated.primary_email)
+        if identity is not None:
+            await self.storage.upsert_identity(replace(identity, email_verified=True, last_seen_at=now))
+        await self._audit("auth.email_verification.consume", target_user_id=updated.id)
+        return updated
+
+    async def request_password_reset(self, email: str) -> MagicLinkChallenge:
+        normalized_email = self._normalize_email(email)
+        self._check_rate_limit(f"password_reset:{hash_secret(normalized_email)}", limit=self.config.magic_link_limit_per_minute)
+        token = generate_token()
+        now = now_utc()
+        user = await self.storage.get_user_by_email(normalized_email)
+        allowed_by_profile = self.config.profile != AuthProfile.SINGLE_OWNER or normalized_email == (self.config.owner_email or "").lower()
+        should_send = user is not None and user.status == UserStatus.ACTIVE and allowed_by_profile
+        flow = LoginFlow(id=f"flow_{uuid4().hex}", flow_type=FlowType.PASSWORD_RESET, provider="email", state_hash=hash_secret(token), email=normalized_email, return_to="/", created_at=now, expires_at=now + timedelta(seconds=self.config.login_flow_ttl_seconds), metadata={"user_id": user.id} if should_send else {})
+        saved = await self.storage.create_login_flow(flow) if should_send else flow
+        if should_send and self.email_sender is not None:
+            self._send_email_best_effort("password_reset", lambda: self.email_sender.send_password_reset(email=normalized_email, token=token))
+        if not should_send:
+            # Keep the negative path expensive to blunt reset-email enumeration.
+            verify_dummy_password(token)
+        await self._audit("auth.password_reset.request", metadata={"email_hash": hash_secret(normalized_email), "sent": should_send})
+        return MagicLinkChallenge(token=token, flow=saved)
+
+    async def consume_password_reset(self, token: str, new_password: str) -> AuthUser:
+        now = now_utc()
+        # Atomic single-use consume (see consume_email_verification note).
+        flow = await self.storage.consume_login_flow_by_state_hash(hash_secret(token), flow_type=FlowType.PASSWORD_RESET, provider="email", now=now)
+        if flow is None:
+            raise AuthenticationFailed("invalid or expired password reset token")
+        user_id = flow.metadata.get("user_id")
+        user = await self.storage.get_user(user_id) if isinstance(user_id, str) else None
+        if user is None and flow.email:
+            user = await self.storage.get_user_by_email(flow.email)
+        if user is None or user.status != UserStatus.ACTIVE:
+            raise AuthenticationFailed("invalid password reset token")
+        if self.config.profile == AuthProfile.SINGLE_OWNER:
+            self._assert_owner_email(user.primary_email)
+        await self.set_password(user.id, new_password, revoke_sessions=False)
+        if self.config.revoke_sessions_on_password_change:
+            revoked = await self.storage.revoke_sessions_for_user(user.id)
+            await self._audit("auth.password_reset.sessions_revoked", target_user_id=user.id, metadata={"revoked_count": revoked})
+        await self._audit("auth.password_reset.consume", target_user_id=user.id)
+        return user
+
     async def issue_session(self, user: AuthUser, *, provider: str | None, context: RequestContext | None = None) -> IssuedSession:
         now = now_utc()
         role = Role.OWNER if self.config.profile == AuthProfile.SINGLE_OWNER else user.role
@@ -183,8 +270,13 @@ class AsyncCorelineAuthService:
         )
         refreshed = session
         if should_touch:
-            refreshed = replace(session, last_seen_at=now, idle_expires_at=now + timedelta(seconds=self.config.session_idle_ttl_seconds) if self.config.session_idle_ttl_seconds else None)
-            await self.storage.update_session(refreshed)
+            refreshed = await self.storage.touch_session(
+                session.id,
+                last_seen_at=now,
+                idle_expires_at=now + timedelta(seconds=self.config.session_idle_ttl_seconds) if self.config.session_idle_ttl_seconds else None,
+            )
+            if refreshed is None:
+                raise AuthenticationFailed("invalid session")
         return Principal(user=user, session=refreshed)
 
     async def logout(self, token: str) -> None:
@@ -252,7 +344,4 @@ class AsyncCorelineAuthService:
 
     @staticmethod
     def _normalize_email(email: str) -> str:
-        normalized = email.strip().lower()
-        if "@" not in normalized:
-            raise AuthValidationError("invalid email")
-        return normalized
+        return normalize_email_address(email)

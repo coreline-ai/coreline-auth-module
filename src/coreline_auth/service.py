@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Callable
@@ -9,7 +10,7 @@ from uuid import uuid4
 
 from .email import EmailSender
 from .errors import AuthConfigurationError, AuthenticationFailed, AuthorizationDenied, AuthValidationError
-from .mfa import InMemoryMfaSecretVault, MfaSecretVault, generate_recovery_code, generate_totp_secret, totp_counter_for_code
+from .mfa import InMemoryMfaSecretVault, InsecureMfaVaultWarning, MfaSecretVault, generate_recovery_code, generate_totp_secret, totp_counter_for_code
 from .models import (
     AuditEvent,
     AuthAssuranceLevel,
@@ -53,6 +54,8 @@ class CorelineAuthConfig:
     login_flow_ttl_seconds: int = 60 * 10
     login_limit_per_minute: int = 10
     magic_link_limit_per_minute: int = 5
+    mfa_verify_limit_per_minute: int = 5
+    allow_insecure_mfa_vault: bool = False
     social_email_linking_requires_verified: bool = True
     revoke_sessions_on_password_change: bool = True
 
@@ -65,6 +68,8 @@ class CorelineAuthConfig:
             raise AuthConfigurationError("session_touch_interval_seconds must be non-negative")
         if self.login_flow_ttl_seconds <= 0:
             raise AuthConfigurationError("login_flow_ttl_seconds must be positive")
+        if self.mfa_verify_limit_per_minute <= 0:
+            raise AuthConfigurationError("mfa_verify_limit_per_minute must be positive")
 
 
 class CorelineAuthService:
@@ -88,17 +93,20 @@ class CorelineAuthService:
         self.metric_sink = metric_sink
         self.email_sender = email_sender
         self.rate_limiter = rate_limiter or FixedWindowRateLimiter()
+        self._mfa_vault_is_insecure_default = mfa_secret_vault is None
         self.mfa_secret_vault = mfa_secret_vault or InMemoryMfaSecretVault()
+        self._mfa_vault_is_insecure = isinstance(self.mfa_secret_vault, InMemoryMfaSecretVault)
         self.support = AuthServiceSupport(storage=storage, config=config, rate_limiter=self.rate_limiter, audit_sink=audit_sink, metric_sink=metric_sink)
 
     def bootstrap_owner(self, *, email: str, password: str | None = None, display_name: str | None = None) -> AuthUser:
-        self._assert_owner_email(self._normalize_email(email))
-        existing = self.storage.get_user_by_email(email)
+        normalized_email = self._normalize_email(email)
+        self._assert_owner_email(normalized_email)
+        existing = self.storage.get_user_by_email(normalized_email)
         if existing is not None:
             if password:
-                self.set_password(existing.id, password)
+                self.set_password(existing.id, password, revoke_sessions=False)
             return existing
-        user = self.create_user(email=email, role=Role.OWNER, password=password, email_verified=True, display_name=display_name)
+        user = self.create_user(email=normalized_email, role=Role.OWNER, password=password, email_verified=True, display_name=display_name)
         self._audit("auth.owner.bootstrap", target_user_id=user.id)
         return user
 
@@ -112,16 +120,20 @@ class CorelineAuthService:
         created = self.storage.create_user(user)
         self.storage.upsert_identity(AuthIdentity(id=f"idn_{uuid4().hex}", user_id=created.id, provider="email", provider_subject=normalized_email, email=normalized_email, email_verified=email_verified))
         if password:
-            self.set_password(created.id, password)
+            self.set_password(created.id, password, revoke_sessions=False)
         self._audit("auth.user.create", target_user_id=created.id, metadata={"role": role.value})
         return created
 
-    def set_password(self, user_id: str, password: str) -> AuthCredential:
+    def set_password(self, user_id: str, password: str, *, revoke_sessions: bool | None = None, except_session_id: str | None = None) -> AuthCredential:
         user = self._require_user(user_id)
         existing = self.storage.get_password_credential(user.id)
         credential = replace(existing, password_hash=hash_password(password), updated_at=now_utc(), revoked_at=None) if existing else AuthCredential(id=f"cred_{uuid4().hex}", user_id=user.id, credential_type=CredentialType.PASSWORD, password_hash=hash_password(password))
         saved = self.storage.upsert_credential(credential)
         self._audit("auth.password.set", target_user_id=user.id)
+        should_revoke = self.config.revoke_sessions_on_password_change if revoke_sessions is None else revoke_sessions
+        if should_revoke:
+            revoked = self.storage.revoke_sessions_for_user(user.id, except_session_id=except_session_id)
+            self._audit("auth.password.sessions_revoked", target_user_id=user.id, metadata={"revoked_count": revoked})
         return saved
 
     def login_password(self, *, email: str, password: str, context: RequestContext | None = None) -> IssuedSession:
@@ -251,14 +263,14 @@ class CorelineAuthService:
             raise AuthenticationFailed("invalid password reset token")
         if self.config.profile == AuthProfile.SINGLE_OWNER:
             self._assert_owner_email(user.primary_email)
-        self.set_password(user.id, new_password)
+        self.set_password(user.id, new_password, revoke_sessions=False)
         if self.config.revoke_sessions_on_password_change:
             revoked = self.storage.revoke_sessions_for_user(user.id)
             self._audit("auth.password_reset.sessions_revoked", target_user_id=user.id, metadata={"revoked_count": revoked})
         self._audit("auth.password_reset.consume", target_user_id=user.id)
         return user
 
-    def begin_social_login(self, *, provider: str, return_to: str = "/") -> str:
+    def begin_social_login(self, *, provider: str, return_to: str = "/", nonce: str | None = None) -> str:
         return_to = self.return_to_policy.validate(return_to)
         state = generate_token()
         now = now_utc()
@@ -268,6 +280,7 @@ class CorelineAuthService:
                 flow_type=FlowType.OAUTH,
                 provider=provider,
                 state_hash=hash_secret(state),
+                nonce_hash=hash_secret(nonce) if nonce else None,
                 return_to=return_to,
                 created_at=now,
                 expires_at=now + timedelta(seconds=self.config.login_flow_ttl_seconds),
@@ -275,11 +288,22 @@ class CorelineAuthService:
         )
         return state
 
-    def login_social(self, *, profile: SocialProfile, state: str | None = None, context: RequestContext | None = None) -> IssuedSession:
+    def consume_social_login_state(self, *, provider: str, state: str, nonce: str | None = None) -> LoginFlow:
+        state_hash = hash_secret(state)
+        now = now_utc()
+        existing = self.storage.get_login_flow_by_state_hash(state_hash)
+        if existing is None or existing.flow_type != FlowType.OAUTH or existing.provider != provider or existing.consumed_at is not None or existing.expires_at <= now:
+            raise AuthenticationFailed("invalid or expired social login state")
+        if existing.nonce_hash is not None and (nonce is None or hash_secret(nonce) != existing.nonce_hash):
+            raise AuthenticationFailed("invalid social login nonce")
+        flow = self.storage.consume_login_flow_by_state_hash(state_hash, flow_type=FlowType.OAUTH, provider=provider, now=now)
+        if flow is None:
+            raise AuthenticationFailed("invalid or expired social login state")
+        return flow
+
+    def login_social(self, *, profile: SocialProfile, state: str | None = None, nonce: str | None = None, context: RequestContext | None = None) -> IssuedSession:
         if state is not None:
-            flow = self.storage.consume_login_flow_by_state_hash(hash_secret(state), flow_type=FlowType.OAUTH, provider=profile.provider, now=now_utc())
-            if flow is None:
-                raise AuthenticationFailed("invalid or expired social login state")
+            self.consume_social_login_state(provider=profile.provider, state=state, nonce=nonce)
         identity = self.storage.get_identity(profile.provider, profile.provider_subject)
         if identity is not None:
             user = self._require_user(identity.user_id)
@@ -338,8 +362,13 @@ class CorelineAuthService:
         )
         refreshed = session
         if should_touch:
-            refreshed = replace(session, last_seen_at=now, idle_expires_at=now + timedelta(seconds=self.config.session_idle_ttl_seconds) if self.config.session_idle_ttl_seconds else None)
-            self.storage.update_session(refreshed)
+            refreshed = self.storage.touch_session(
+                session.id,
+                last_seen_at=now,
+                idle_expires_at=now + timedelta(seconds=self.config.session_idle_ttl_seconds) if self.config.session_idle_ttl_seconds else None,
+            )
+            if refreshed is None:
+                raise AuthenticationFailed("invalid session")
         return Principal(user=user, session=refreshed)
 
     def logout(self, token: str) -> None:
@@ -370,6 +399,20 @@ class CorelineAuthService:
 
     def begin_totp_enrollment(self, user_id: str, *, name: str = "Authenticator") -> tuple[AuthMfaFactor, str]:
         user = self._require_user(user_id)
+        if self._mfa_vault_is_insecure and not self.config.allow_insecure_mfa_vault:
+            raise AuthConfigurationError(
+                "TOTP enrollment requires an encrypted mfa_secret_vault; "
+                "set allow_insecure_mfa_vault=True only for tests or local demos"
+            )
+        if self._mfa_vault_is_insecure_default:
+            warnings.warn(
+                "TOTP secret will be stored in plaintext by the default "
+                "InMemoryMfaSecretVault. Configure an encrypted vault "
+                "(SQLiteMfaSecretVault or RedisMfaSecretVault) before production use, "
+                "or set allow_insecure_mfa_vault=True only for tests/local demos.",
+                InsecureMfaVaultWarning,
+                stacklevel=2,
+            )
         secret = generate_totp_secret()
         factor = AuthMfaFactor(
             id=f"mfa_{uuid4().hex}",
@@ -404,16 +447,20 @@ class CorelineAuthService:
             if factor.last_used_counter is not None and counter <= factor.last_used_counter:
                 self._metric("auth.mfa.totp_replay_blocked", {"factor_id": factor.id})
                 continue
-            updated = replace(factor, last_used_at=now_utc(), last_used_counter=counter)
-            self.storage.update_mfa_factor(updated)
+            updated = self.storage.mark_mfa_factor_counter_used(factor.id, counter=counter, used_at=now_utc())
+            if updated is None:
+                self._metric("auth.mfa.totp_replay_blocked", {"factor_id": factor.id})
+                continue
             return updated
         raise AuthenticationFailed("invalid mfa code")
 
     def step_up_totp(self, session_token: str, *, code: str) -> Principal:
         principal = self.verify_session(session_token)
+        self._check_rate_limit(self._mfa_step_up_rate_limit_key(principal), limit=self.config.mfa_verify_limit_per_minute)
         factor = self.verify_totp(user_id=principal.user_id, code=code)
-        updated_session = replace(principal.session, assurance_level=AuthAssuranceLevel.AAL2, last_seen_at=now_utc())
-        self.storage.update_session(updated_session)
+        updated_session = self.storage.set_session_assurance_level(principal.session.id, assurance_level=AuthAssuranceLevel.AAL2, last_seen_at=now_utc())
+        if updated_session is None:
+            raise AuthenticationFailed("invalid session")
         self._audit("auth.mfa.step_up", actor_user_id=principal.user_id, metadata={"factor_id": factor.id, "method": "totp"})
         return Principal(user=principal.user, session=updated_session)
 
@@ -429,6 +476,7 @@ class CorelineAuthService:
 
     def step_up_recovery_code(self, session_token: str, *, code: str) -> Principal:
         principal = self.verify_session(session_token)
+        self._check_rate_limit(self._mfa_step_up_rate_limit_key(principal), limit=self.config.mfa_verify_limit_per_minute)
         code_hash = hash_secret(code)
         for saved in self.storage.list_recovery_codes(principal.user_id):
             if saved.used_at is None and saved.code_hash == code_hash:
@@ -436,8 +484,9 @@ class CorelineAuthService:
                     self.storage.mark_recovery_code_used(saved.id, used_at=now_utc())
                 except AuthValidationError as exc:
                     raise AuthenticationFailed("invalid recovery code") from exc
-                updated_session = replace(principal.session, assurance_level=AuthAssuranceLevel.AAL2, last_seen_at=now_utc())
-                self.storage.update_session(updated_session)
+                updated_session = self.storage.set_session_assurance_level(principal.session.id, assurance_level=AuthAssuranceLevel.AAL2, last_seen_at=now_utc())
+                if updated_session is None:
+                    raise AuthenticationFailed("invalid session")
                 self._audit("auth.mfa.step_up", actor_user_id=principal.user_id, metadata={"method": "recovery_code"})
                 return Principal(user=principal.user, session=updated_session)
         raise AuthenticationFailed("invalid recovery code")
@@ -466,6 +515,10 @@ class CorelineAuthService:
 
     def _check_rate_limit(self, key: str, *, limit: int) -> None:
         self.support.check_rate_limit(key, limit=limit)
+
+    @staticmethod
+    def _mfa_step_up_rate_limit_key(principal: Principal) -> str:
+        return f"mfa_step_up:{hash_secret(principal.user_id)}"
 
     def _record_login(self, user: AuthUser) -> None:
         self.support.record_login(user)

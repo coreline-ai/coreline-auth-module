@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from coreline_auth import FacebookOAuthConnector, GenericOIDCConnector, GoogleOAuthConnector, JWKSCache, OIDCMetadataClient, OAuthPKCE, discover_oidc_metadata, redact_token_response
+from coreline_auth import FacebookOAuthConnector, GenericOIDCConnector, GoogleOAuthConnector, IdTokenClaims, JWKSCache, OAuthConnector, OIDCMetadataClient, OAuthPKCE, OAuthProviderConfig, discover_oidc_metadata, redact_token_response
 from coreline_auth.errors import AuthConfigurationError, AuthenticationFailed
 
 
@@ -23,6 +23,37 @@ def _oidc_connector() -> GenericOIDCConnector:
         token_url="https://id.example.com/oauth2/token",
         userinfo_url="https://id.example.com/oauth2/userinfo",
     )
+
+
+def _provider_config(**overrides: str | None) -> OAuthProviderConfig:
+    values: dict[str, str | None] = {
+        "provider": "direct",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "redirect_uri": "https://app.example.com/callback",
+        "scope": "openid email profile",
+        "auth_url": "https://issuer.example.com/auth",
+        "token_url": "https://issuer.example.com/token",
+        "userinfo_url": "https://issuer.example.com/userinfo",
+        "issuer": "https://issuer.example.com/",
+    }
+    values.update(overrides)
+    return OAuthProviderConfig(**values)  # type: ignore[arg-type]
+
+
+def test_oauth_connector_validates_direct_config_urls() -> None:
+    connector = OAuthConnector(_provider_config())
+
+    assert connector.config.issuer == "https://issuer.example.com"
+
+    with pytest.raises(AuthConfigurationError, match="https"):
+        OAuthConnector(_provider_config(token_url="http://issuer.example.com/token"))
+    with pytest.raises(AuthConfigurationError, match="credentials"):
+        OAuthConnector(_provider_config(userinfo_url="https://user:pass@issuer.example.com/userinfo"))
+    with pytest.raises(AuthConfigurationError, match="fragment"):
+        OAuthConnector(_provider_config(auth_url="https://issuer.example.com/auth#frag"))
+    with pytest.raises(AuthConfigurationError, match="absolute"):
+        OAuthConnector(_provider_config(redirect_uri="/social/callback"))
 
 
 def test_authorization_url_preserves_google_defaults_and_supports_oidc_pkce_params() -> None:
@@ -305,6 +336,61 @@ def test_exchange_code_uses_pkce_but_returns_profile_without_raw_provider_tokens
     assert "raw-access-token" not in repr(profile)
     assert "raw-refresh-token" not in repr(profile)
     assert "raw-id-token" not in repr(profile)
+
+
+def test_exchange_code_can_verify_oidc_id_token_without_userinfo_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    connector = _oidc_connector()
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    def fake_post(url: str, *, data: dict[str, str], timeout: float) -> FakeResponse:
+        seen["token_url"] = url
+        seen["token_request"] = dict(data)
+        return FakeResponse({"id_token": "raw-id-token", "access_token": "raw-access-token"})
+
+    def fake_verify(id_token: str, **kwargs) -> IdTokenClaims:
+        seen["id_token"] = id_token
+        seen["verify_kwargs"] = kwargs
+        return IdTokenClaims(
+            issuer="https://id.example.com",
+            subject="sub-from-id-token",
+            audience="client-id",
+            expires_at=2_000,
+            email="user@example.com",
+            email_verified=True,
+            name="ID Token User",
+            picture="https://example.com/avatar.png",
+            nonce="nonce-1",
+        )
+
+    monkeypatch.setattr("coreline_auth.social.httpx.post", fake_post)
+    monkeypatch.setattr("coreline_auth.social.httpx.get", lambda *_, **__: pytest.fail("userinfo should not be fetched after ID token verification"))
+    monkeypatch.setattr("coreline_auth.social.connectors.verify_oidc_id_token", fake_verify)
+
+    profile = connector.exchange_code(
+        code="auth-code",
+        code_verifier="pkce-verifier",
+        expected_nonce="nonce-1",
+        id_token_jwks={"keys": []},
+    )
+
+    assert seen["token_request"]["code_verifier"] == "pkce-verifier"
+    assert seen["id_token"] == "raw-id-token"
+    assert seen["verify_kwargs"]["audience"] == "client-id"
+    assert seen["verify_kwargs"]["issuer"] == "https://id.example.com"
+    assert seen["verify_kwargs"]["expected_nonce"] == "nonce-1"
+    assert profile.provider == "example-oidc"
+    assert profile.provider_subject == "sub-from-id-token"
+    assert profile.email_verified is True
 
 
 def test_exchange_code_rejects_oversize_response_and_redacts_token_data(monkeypatch: pytest.MonkeyPatch) -> None:

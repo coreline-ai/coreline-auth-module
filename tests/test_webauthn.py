@@ -7,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from coreline_auth import AuthenticationFailed, generate_webauthn_challenge, verify_passkey_assertion_response, verify_passkey_registration_response
+from coreline_auth import AuthenticationFailed, AuthValidationError, generate_webauthn_challenge, verify_passkey_assertion_response, verify_passkey_registration_response
 
 
 def _b64url(data: bytes) -> str:
@@ -31,6 +31,49 @@ def test_passkey_registration_and_assertion_verification() -> None:
         public_key_pem=public_pem,
         sign_count=1,
     )
+
+    assert verify_passkey_registration_response(
+        challenge=challenge,
+        expected_challenge_hash=challenge_hash,
+        origin="http://localhost",
+        rp_id="localhost",
+        credential_id="cred-local",
+        public_key_pem=public_pem,
+        sign_count=0,
+    ).credential_id == "cred-local"
+
+    with pytest.raises(AuthValidationError):
+        verify_passkey_registration_response(
+            challenge=challenge,
+            expected_challenge_hash=challenge_hash,
+            origin="http://localhost.evil.example",
+            rp_id="localhost.evil.example",
+            credential_id="cred-evil",
+            public_key_pem=public_pem,
+            sign_count=0,
+        )
+
+    with pytest.raises(AuthValidationError):
+        verify_passkey_registration_response(
+            challenge=challenge,
+            expected_challenge_hash=challenge_hash,
+            origin="https://app.example.com.evil.example",
+            rp_id="app.example.com",
+            credential_id="cred-evil",
+            public_key_pem=public_pem,
+            sign_count=0,
+        )
+
+    with pytest.raises(AuthValidationError):
+        verify_passkey_registration_response(
+            challenge=challenge,
+            expected_challenge_hash=challenge_hash,
+            origin="https://app.example.com",
+            rp_id="app.example.com:443",
+            credential_id="cred-port",
+            public_key_pem=public_pem,
+            sign_count=0,
+        )
 
     client_data = json.dumps({"type": "webauthn.get", "challenge": challenge, "origin": "https://app.example.com"}, separators=(",", ":")).encode("utf-8")
     digest = hashes.Hash(hashes.SHA256())

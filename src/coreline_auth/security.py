@@ -10,10 +10,13 @@ from urllib.parse import urlparse
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError
+from email_validator import EmailNotValidError, validate_email
 
 from .errors import AuthValidationError
 
 _TOKEN_BYTES = 32
+_MAX_RETURN_TO_BYTES = 2048
+_UNSAFE_RETURN_TO_CHARS = frozenset({"<", ">", '"', "'", "`", "\\", "\r", "\n", "\t"})
 _password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16)
 _DUMMY_PASSWORD_HASH = _password_hasher.hash("coreline-auth-dummy-password")
 
@@ -32,6 +35,21 @@ def compare_hash(secret: str, expected_hash: str) -> bool:
 
 def hash_optional_context(value: str | None) -> str | None:
     return hash_secret(value) if value else None
+
+
+def normalize_email_address(email: str) -> str:
+    """Validate and canonicalize user email input before storage or SMTP use."""
+
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in email):
+        raise AuthValidationError("invalid email")
+    try:
+        validated = validate_email(email.strip(), check_deliverability=False)
+    except EmailNotValidError as exc:
+        raise AuthValidationError("invalid email") from exc
+    normalized = validated.normalized.lower()
+    if len(normalized) > 320:
+        raise AuthValidationError("invalid email")
+    return normalized
 
 
 def hash_password(password: str) -> str:
@@ -64,6 +82,10 @@ class SafeReturnToPolicy:
     def validate(self, return_to: str | None) -> str:
         if not return_to:
             return "/"
+        if len(return_to.encode("utf-8")) > _MAX_RETURN_TO_BYTES:
+            raise AuthValidationError("return_to is too long")
+        if any(char in _UNSAFE_RETURN_TO_CHARS or ord(char) < 0x20 or ord(char) == 0x7F for char in return_to):
+            raise AuthValidationError("return_to contains unsafe characters")
         parsed = urlparse(return_to)
         if parsed.scheme or parsed.netloc:
             raise AuthValidationError("return_to must be a same-site relative path")

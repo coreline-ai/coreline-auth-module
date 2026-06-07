@@ -32,17 +32,17 @@ def make_admin_client(*, audit_sink: Callable[[AuditEvent], None] | None = None)
 
 def test_admin_routes_list_filter_role_ban_unban() -> None:
     auth, client, headers, user = make_admin_client()
-    auth.create_user(email="writer@example.com", role=Role.AUTHOR, password=PASSWORD, email_verified=True, display_name="Writer")
+    auth.create_user(email="reader@example.com", role=Role.VIEWER, password=PASSWORD, email_verified=True, display_name="Reader")
 
     users = client.get("/auth/admin/users", headers=headers)
     assert users.status_code == 200
     assert len(users.json()["users"]) == 3
 
-    by_query = client.get("/auth/admin/users?query=writer", headers=headers)
-    assert [row["email"] for row in by_query.json()["users"]] == ["writer@example.com"]
+    by_query = client.get("/auth/admin/users?query=reader", headers=headers)
+    assert [row["email"] for row in by_query.json()["users"]] == ["reader@example.com"]
 
-    by_role = client.get("/auth/admin/users?role=author", headers=headers)
-    assert [row["email"] for row in by_role.json()["users"]] == ["writer@example.com"]
+    by_role = client.get("/auth/admin/users?role=viewer", headers=headers)
+    assert [row["email"] for row in by_role.json()["users"]] == ["reader@example.com"]
 
     assert client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "viewer"}).status_code == 200
     assert client.post(f"/auth/admin/users/{user.id}/ban", headers=headers).json()["user"]["status"] == "banned"
@@ -53,16 +53,33 @@ def test_admin_routes_list_filter_role_ban_unban() -> None:
     assert client.post(f"/auth/admin/users/{user.id}/unban", headers=headers).json()["user"]["status"] == "active"
 
 
-def test_admin_role_update_accepts_author_and_moderator() -> None:
+
+def test_cookie_admin_post_without_csrf_is_blocked_by_default() -> None:
+    _, client, _, user = make_admin_client()
+
+    response = client.post(f"/auth/admin/users/{user.id}/role", json={"role": "viewer"})
+
+    assert response.status_code == 403
+
+
+def test_admin_role_update_rejects_board_demo_roles_in_core_api() -> None:
     _, client, headers, user = make_admin_client()
 
-    author = client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "author"})
-    assert author.status_code == 200
-    assert author.json()["user"]["role"] == "author"
+    assert client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "author"}).status_code == 422
+    assert client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "moderator"}).status_code == 422
 
-    moderator = client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "moderator"})
-    assert moderator.status_code == 200
-    assert moderator.json()["user"]["role"] == "moderator"
+
+
+def test_admin_role_update_revokes_existing_target_sessions() -> None:
+    _, client, headers, user = make_admin_client()
+    user_login = client.post("/auth/login", json={"email": "user@example.com", "password": PASSWORD})
+    old_token = user_login.cookies["coreline_auth_session"]
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {old_token}"}).status_code == 200
+
+    response = client.post(f"/auth/admin/users/{user.id}/role", headers=headers, json={"role": "viewer"})
+
+    assert response.status_code == 200
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {old_token}"}).status_code == 401
 
 
 def test_admin_ban_and_unban_reason_is_audited() -> None:

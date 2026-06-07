@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Mapping
+from dataclasses import replace
 
 import httpx
 
@@ -21,12 +22,25 @@ from ._utils import (
 )
 from .discovery import OIDCMetadataFetcher, discover_oidc_metadata
 from .models import OAuthPKCE, OAuthProviderConfig, OAuthStart, OIDCProviderMetadata, SocialProfile
+from .verification import verify_google_id_token, verify_oidc_id_token
 
 class OAuthConnector:
     def __init__(self, config: OAuthProviderConfig) -> None:
         if not config.client_id or not config.client_secret or not config.redirect_uri:
             raise AuthConfigurationError(f"{config.provider} OAuth connector requires client_id, client_secret and redirect_uri")
-        self.config = config
+        auth_url = _normalize_provider_url("auth_url", config.auth_url, allow_path=True)
+        token_url = _normalize_provider_url("token_url", config.token_url, allow_path=True)
+        userinfo_url = _normalize_provider_url("userinfo_url", config.userinfo_url, allow_path=True)
+        redirect_uri = _normalize_provider_url("redirect_uri", config.redirect_uri, allow_path=True)
+        issuer = _normalize_provider_url("issuer", config.issuer, allow_path=True).rstrip("/") if config.issuer is not None else None
+        self.config = replace(
+            config,
+            auth_url=auth_url,
+            token_url=token_url,
+            userinfo_url=userinfo_url,
+            redirect_uri=redirect_uri,
+            issuer=issuer,
+        )
 
     def authorization_url(
         self,
@@ -83,7 +97,20 @@ class OAuthConnector:
             code_verifier=pkce.code_verifier if pkce else None,
         )
 
-    def exchange_code(self, *, code: str, code_verifier: str | None = None, timeout_seconds: float = 10.0, max_response_bytes: int = 64 * 1024) -> SocialProfile:
+    def exchange_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str | None = None,
+        expected_nonce: str | None = None,
+        id_token_jwks: Mapping[str, object] | None = None,
+        id_token_audience: str | None = None,
+        id_token_issuer: str | set[str] | None = None,
+        expected_azp: str | None = None,
+        max_age_seconds: int | None = None,
+        timeout_seconds: float = 10.0,
+        max_response_bytes: int = 64 * 1024,
+    ) -> SocialProfile:
         token_request: dict[str, str] = {
             "client_id": self.config.client_id,
             "client_secret": self.config.client_secret,
@@ -100,6 +127,44 @@ class OAuthConnector:
         )
         token_response.raise_for_status()
         token_data = _response_json_object(token_response, context="provider token response", max_bytes=max_response_bytes)
+
+        if expected_nonce is not None or id_token_jwks is not None:
+            if id_token_jwks is None:
+                raise AuthConfigurationError("ID token JWKS is required for nonce/ID token verification")
+            id_token = _optional_string(token_data.get("id_token"))
+            if id_token is None:
+                raise AuthenticationFailed("provider did not return an ID token")
+            audience = id_token_audience or self.config.client_id
+            if self.config.provider == "google":
+                return verify_google_id_token(
+                    id_token,
+                    audience=audience,
+                    jwks=id_token_jwks,
+                    expected_nonce=expected_nonce,
+                    expected_azp=expected_azp,
+                    max_age_seconds=max_age_seconds,
+                )
+            issuer = id_token_issuer or self.config.issuer
+            if issuer is None:
+                raise AuthConfigurationError("OIDC issuer is required for ID token verification")
+            claims = verify_oidc_id_token(
+                id_token,
+                audience=audience,
+                issuer=issuer,
+                jwks=id_token_jwks,
+                expected_nonce=expected_nonce,
+                expected_azp=expected_azp,
+                max_age_seconds=max_age_seconds,
+            )
+            return SocialProfile(
+                provider=self.config.provider,
+                provider_subject=claims.subject,
+                email=claims.email,
+                email_verified=claims.email_verified,
+                display_name=claims.name,
+                avatar_url=claims.picture,
+            )
+
         access_token = _extract_access_token(token_data)
 
         userinfo_response = httpx.get(

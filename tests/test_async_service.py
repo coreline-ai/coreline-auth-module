@@ -15,9 +15,9 @@ class CountingAsyncMemoryAuthStorage(AsyncMemoryAuthStorage):
         super().__init__()
         self.session_updates = 0
 
-    async def update_session(self, session):
+    async def touch_session(self, session_id, *, last_seen_at, idle_expires_at):
         self.session_updates += 1
-        return await super().update_session(session)
+        return await super().touch_session(session_id, last_seen_at=last_seen_at, idle_expires_at=idle_expires_at)
 
 
 class FailingAuditAsyncMemoryAuthStorage(AsyncMemoryAuthStorage):
@@ -86,7 +86,7 @@ def test_async_magic_link_consume_is_atomic_for_memory_storage() -> None:
     run(scenario())
 
 
-def test_async_session_touch_interval_throttles_update_session() -> None:
+def test_async_session_touch_interval_throttles_touch_session() -> None:
     async def scenario() -> None:
         storage = CountingAsyncMemoryAuthStorage()
         service = AsyncCorelineAuthService(
@@ -101,7 +101,7 @@ def test_async_session_touch_interval_throttles_update_session() -> None:
     run(scenario())
 
 
-def test_async_session_touch_interval_zero_updates_session() -> None:
+def test_async_session_touch_interval_zero_touches_session() -> None:
     async def scenario() -> None:
         storage = CountingAsyncMemoryAuthStorage()
         service = AsyncCorelineAuthService(
@@ -142,6 +142,66 @@ def test_async_magic_link_email_failure_is_best_effort() -> None:
         challenge = await service.request_magic_link(email="owner@example.com")
         assert challenge.token
         assert metrics.count("auth.email_send_failed") == 1
+
+    run(scenario())
+
+
+def test_async_password_reset_is_one_time_and_rotates_password() -> None:
+    async def scenario() -> None:
+        service = AsyncCorelineAuthService(
+            storage=AsyncMemoryAuthStorage(),
+            config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False),
+        )
+        await service.create_user(email="user@example.com", password="old password value", email_verified=True)
+        challenge = await service.request_password_reset(email="user@example.com")
+
+        await service.consume_password_reset(challenge.token, "new password value")
+
+        with pytest.raises(AuthenticationFailed):
+            await service.login_password(email="user@example.com", password="old password value")
+        issued = await service.login_password(email="user@example.com", password="new password value")
+        assert (await service.verify_session(issued.token)).email == "user@example.com"
+
+        with pytest.raises(AuthenticationFailed):
+            await service.consume_password_reset(challenge.token, "another password value")
+
+    run(scenario())
+
+
+def test_async_password_reset_consume_is_atomic_for_memory_storage() -> None:
+    async def scenario() -> None:
+        service = AsyncCorelineAuthService(
+            storage=AsyncMemoryAuthStorage(),
+            config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False),
+        )
+        await service.create_user(email="user@example.com", password="old password value", email_verified=True)
+        challenge = await service.request_password_reset(email="user@example.com")
+        results = await asyncio.gather(
+            service.consume_password_reset(challenge.token, "new password one!"),
+            service.consume_password_reset(challenge.token, "new password two!"),
+            return_exceptions=True,
+        )
+        assert sum(1 for result in results if not isinstance(result, Exception)) == 1
+        assert sum(1 for result in results if isinstance(result, AuthenticationFailed)) == 1
+
+    run(scenario())
+
+
+def test_async_email_verification_marks_user_verified_and_is_one_time() -> None:
+    async def scenario() -> None:
+        service = AsyncCorelineAuthService(
+            storage=AsyncMemoryAuthStorage(),
+            config=CorelineAuthConfig(profile=AuthProfile.RBAC, require_email_verified=False),
+        )
+        user = await service.create_user(email="user@example.com", password="correct horse battery", email_verified=False)
+        assert user.primary_email_verified is False
+
+        challenge = await service.request_email_verification(user_id=user.id)
+        verified = await service.consume_email_verification(challenge.token)
+        assert verified.primary_email_verified is True
+
+        with pytest.raises(AuthenticationFailed):
+            await service.consume_email_verification(challenge.token)
 
     run(scenario())
 

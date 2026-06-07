@@ -370,10 +370,52 @@ class SQLiteAuthStorage:
 
     def update_session(self, session: AuthSession) -> None:
         with self._lock:
-            cursor = self.db.execute("UPDATE auth_sessions SET expires_at = ?, idle_expires_at = ?, revoked_at = ?, last_seen_at = ?, assurance_level = ? WHERE id = ?", (to_iso(session.expires_at), _optional_iso(session.idle_expires_at), _optional_iso(session.revoked_at), _optional_iso(session.last_seen_at), session.assurance_level.value, session.id))
+            cursor = self.db.execute(
+                """
+                UPDATE auth_sessions
+                SET expires_at = ?,
+                    idle_expires_at = ?,
+                    revoked_at = COALESCE(revoked_at, ?),
+                    last_seen_at = ?,
+                    assurance_level = CASE
+                      WHEN assurance_level = 'aal2' THEN assurance_level
+                      ELSE ?
+                    END
+                WHERE id = ?
+                """,
+                (to_iso(session.expires_at), _optional_iso(session.idle_expires_at), _optional_iso(session.revoked_at), _optional_iso(session.last_seen_at), session.assurance_level.value, session.id),
+            )
             self.db.commit()
         if cursor.rowcount == 0:
             raise AuthValidationError("session not found")
+
+    def touch_session(self, session_id: str, *, last_seen_at: datetime, idle_expires_at: datetime | None) -> AuthSession | None:
+        with self._lock:
+            row = self.db.execute(
+                """
+                UPDATE auth_sessions
+                SET last_seen_at = ?, idle_expires_at = ?
+                WHERE id = ? AND revoked_at IS NULL
+                RETURNING *
+                """,
+                (_optional_iso(last_seen_at), _optional_iso(idle_expires_at), session_id),
+            ).fetchone()
+            self.db.commit()
+        return self._session_from_row(row) if row else None
+
+    def set_session_assurance_level(self, session_id: str, *, assurance_level: AuthAssuranceLevel, last_seen_at: datetime) -> AuthSession | None:
+        with self._lock:
+            row = self.db.execute(
+                """
+                UPDATE auth_sessions
+                SET assurance_level = ?, last_seen_at = ?
+                WHERE id = ? AND revoked_at IS NULL
+                RETURNING *
+                """,
+                (assurance_level.value, _optional_iso(last_seen_at), session_id),
+            ).fetchone()
+            self.db.commit()
+        return self._session_from_row(row) if row else None
 
     def revoke_session(self, session_id: str) -> None:
         with self._lock:
@@ -496,6 +538,20 @@ class SQLiteAuthStorage:
             self.db.commit()
         if cursor.rowcount == 0:
             raise AuthValidationError("mfa factor not found")
+
+    def mark_mfa_factor_counter_used(self, factor_id: str, *, counter: int, used_at: datetime) -> AuthMfaFactor | None:
+        with self._lock:
+            row = self.db.execute(
+                """
+                UPDATE auth_mfa_factors
+                SET last_used_at = ?, last_used_counter = ?
+                WHERE id = ? AND (last_used_counter IS NULL OR last_used_counter < ?)
+                RETURNING *
+                """,
+                (to_iso(used_at), counter, factor_id, counter),
+            ).fetchone()
+            self.db.commit()
+        return self._mfa_factor_from_row(row) if row else None
 
     def create_recovery_code(self, code: AuthRecoveryCode) -> AuthRecoveryCode:
         with self._lock:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from coreline_auth.models import AuditEvent, AuthCredential, AuthIdentity, AuthMfaFactor, AuthRecoveryCode, AuthSession, AuthUser, FlowType, LoginFlow, Role, UserStatus
+from coreline_auth.models import AuditEvent, AuthAssuranceLevel, AuthCredential, AuthIdentity, AuthMfaFactor, AuthRecoveryCode, AuthSession, AuthUser, FlowType, LoginFlow, Role, UserStatus
 from coreline_auth.storage.memory import MemoryAuthStorage
 
 
@@ -69,6 +69,12 @@ class AsyncMemoryAuthStorage:
     async def update_session(self, session: AuthSession) -> None:
         return self.sync.update_session(session)
 
+    async def touch_session(self, session_id: str, *, last_seen_at: datetime, idle_expires_at: datetime | None) -> AuthSession | None:
+        return self.sync.touch_session(session_id, last_seen_at=last_seen_at, idle_expires_at=idle_expires_at)
+
+    async def set_session_assurance_level(self, session_id: str, *, assurance_level: AuthAssuranceLevel, last_seen_at: datetime) -> AuthSession | None:
+        return self.sync.set_session_assurance_level(session_id, assurance_level=assurance_level, last_seen_at=last_seen_at)
+
     async def revoke_session(self, session_id: str) -> None:
         return self.sync.revoke_session(session_id)
 
@@ -95,6 +101,9 @@ class AsyncMemoryAuthStorage:
 
     async def update_mfa_factor(self, factor: AuthMfaFactor) -> None:
         return self.sync.update_mfa_factor(factor)
+
+    async def mark_mfa_factor_counter_used(self, factor_id: str, *, counter: int, used_at: datetime) -> AuthMfaFactor | None:
+        return self.sync.mark_mfa_factor_counter_used(factor_id, counter=counter, used_at=used_at)
 
     async def create_recovery_code(self, code: AuthRecoveryCode) -> AuthRecoveryCode:
         return self.sync.create_recovery_code(code)

@@ -24,11 +24,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from coreline_auth import AuditEvent, AuthProfile, AuthSession, AuthUser, AuthenticationFailed, CorelineAdminService, CorelineAuthConfig, CorelineAuthService, CsrfProtector, DevSocialConnector, EmailTemplateSet, FacebookOAuthConnector, GoogleOAuthConnector, InMemoryEmailSender, Role
-from coreline_auth.examples.board_seed import DEMO_BOARD_PASSWORD, DEMO_BOARD_USERS, seed_demo_board
-from coreline_auth.examples.board_service import BoardService
-from coreline_auth.examples.board_storage import SQLiteBoardStorage
-from coreline_auth.examples.board_web import mount_board_routes
+from coreline_auth import AuditEvent, AuthProfile, AuthSession, AuthUser, AuthenticationFailed, CorelineAdminService, CorelineAuthConfig, CorelineAuthService, CsrfProtector, DevSocialConnector, EmailTemplateSet, FacebookOAuthConnector, GoogleOAuthConnector, InMemoryEmailSender, JWKSCache, OAuthPKCE, OIDCMetadataClient, Role, discover_oidc_metadata
 from coreline_auth.fastapi_adapter import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, mount_admin_routes, mount_auth_routes, request_context
 from coreline_auth.storage import SQLiteAuthStorage
 from coreline_auth.examples.saas_demo.config import load_demo_settings
@@ -36,7 +32,7 @@ from coreline_auth.examples.saas_demo.csrf import csrf_token_for_page, demo_csrf
 from coreline_auth.examples.saas_demo.layout import render_page
 from coreline_auth.models import UserStatus, now_utc
 from coreline_auth.ops_readiness import collect_readiness
-from coreline_auth.security import hash_secret, verify_password
+from coreline_auth.security import generate_token, hash_secret, verify_password
 
 settings = load_demo_settings()
 OWNER_EMAIL = settings.owner_email
@@ -60,11 +56,12 @@ if existing_owner is None:
 elif DEMO_MODE:
     # Keep the local self-test app recoverable even when a previous demo DB was
     # created with a different password during development.
-    auth.set_password(existing_owner.id, OWNER_PASSWORD)
+    auth.set_password(existing_owner.id, OWNER_PASSWORD, revoke_sessions=False)
 
 app = FastAPI(title="Coreline Auth Demo SaaS")
-mount_auth_routes(app, auth, expose_magic_link_token=DEMO_MODE, secure_cookies=False)
-mount_admin_routes(app, auth)
+mount_auth_routes(app, auth, expose_magic_link_token=DEMO_MODE, secure_cookies=False, csrf_protector=csrf)
+mount_admin_routes(app, auth, csrf_protector=csrf)
+_oidc_jwks_caches: dict[str, JWKSCache] = {}
 
 
 def page(title: str, body: str, *, public: bool = False) -> HTMLResponse:
@@ -74,7 +71,6 @@ def page(title: str, body: str, *, public: bool = False) -> HTMLResponse:
         csrf_token=csrf_token_for_page(csrf),
         public=public,
         demo_mode=DEMO_MODE,
-        role_entries=DEMO_BOARD_USERS,
     )
 
 
@@ -95,21 +91,17 @@ def current_principal(request: Request):
 
 
 LOGIN_AUDIT_ACTIONS = {"auth.login.password", "auth.magic_link.consume", "auth.login.social"}
-ROLE_DASHBOARD_ORDER = (Role.OWNER, Role.ADMIN, Role.MODERATOR, Role.AUTHOR, Role.USER, Role.VIEWER)
+ROLE_DASHBOARD_ORDER = (Role.OWNER, Role.ADMIN, Role.USER, Role.VIEWER)
 ROLE_DESCRIPTIONS = {
     Role.OWNER: "전체 시스템 권한과 최종 소유권을 가진 계정",
     Role.ADMIN: "사용자, 권한, 감사 로그를 관리하는 운영 관리자",
-    Role.MODERATOR: "게시글/댓글 운영과 사용자 조회를 담당하는 운영자",
-    Role.AUTHOR: "게시글 작성과 본인 글 수정/삭제가 가능한 작성자",
-    Role.USER: "게시글/댓글 작성이 가능한 일반 사용자",
-    Role.VIEWER: "게시판과 대시보드를 읽기만 하는 조회 전용 사용자",
+    Role.USER: "대시보드와 자기 계정 기능을 사용하는 일반 사용자",
+    Role.VIEWER: "대시보드와 운영 상태를 읽기만 하는 조회 전용 사용자",
 }
 PERMISSION_MATRIX = (
+    ("프로필", "profile:read"),
     ("대시보드", "dashboard:read"),
-    ("게시판 읽기", "board:read"),
-    ("글 작성", "post:create"),
-    ("본인 글 수정", "post:update:own"),
-    ("모든 글 수정", "post:update:any"),
+    ("서비스", "services:read"),
     ("사용자 조회", "users:read"),
     ("감사 로그", "audit:read"),
 )
@@ -199,7 +191,7 @@ def _render_user_activity_card(user: AuthUser, *, sessions: list[AuthSession], e
     <section id='{html.escape(fragment)}' class='user-popover' aria-label='개인 로그인 정보'>
       <a class='user-popover-backdrop' href='#admin-users' aria-label='닫기'></a>
       <article class='user-popover-card'>
-        <div class='board-toolbar'>
+        <div class='section-toolbar'>
           <div>
             <p class='muted'>개인 로그인 정보</p>
             <h2>{html.escape(user.primary_email)}</h2>
@@ -388,7 +380,7 @@ def _render_my_dashboard(principal) -> str:
     admin_link = "<a class='button secondary' href='/admin'>관리자 대시보드</a>" if can_admin else "<a class='button secondary' href='/admin'>관리자 접근 테스트</a>"
     return f"""
     <section class='card'>
-      <div class='board-toolbar'>
+      <div class='section-toolbar'>
         <div>
           <h2>내 계정 요약</h2>
           <p class='muted'>일반 사용자도 자신의 계정, 권한, 세션, 최근 활동을 GUI 카드로 확인할 수 있습니다.</p>
@@ -417,7 +409,7 @@ def _render_my_dashboard(principal) -> str:
     <section class='card'>
       <h2>내 최근 활동</h2>
       <div class='activity-table-wrap'><table class='activity-table'><thead><tr><th>Time</th><th>Action</th><th>Metadata</th></tr></thead><tbody>{recent_event_rows}</tbody></table></div>
-      <div class='nav'><a class='button' href='/board'>게시판 열기</a>{admin_link}<form method='post' action='/logout' style='display:inline'><button class='danger'>로그아웃</button></form></div>
+      <div class='nav'>{admin_link}<a class='button secondary' href='/account'>내 계정</a><form method='post' action='/logout' style='display:inline'><button class='danger'>로그아웃</button></form></div>
     </section>
     """
 
@@ -447,7 +439,6 @@ def _admin_forbidden_page(*, title: str, required_permission: str, token: str | 
             </div>
             <div class='nav'>
               <a class='button' href='/'>대시보드로 돌아가기</a>
-              <a class='button secondary' href='/board'>게시판으로 이동</a>
               <form method='post' action='/logout' style='display:inline'><button class='danger'>다른 계정으로 로그인</button></form>
             </div>
             <p class='muted'>테스트하려면 왼쪽 권한 계정에서 <code>owner</code> 또는 <code>admin</code> 계정으로 로그인하세요.</p>
@@ -605,13 +596,6 @@ def _same_site_referer_path(request: Request, *, default: str = "/admin") -> str
     return path + suffix
 
 
-board_storage = SQLiteBoardStorage(DB_PATH)
-if DEMO_MODE:
-    seed_demo_board(auth, board_storage)
-board_service = BoardService(auth, storage=board_storage)
-mount_board_routes(app, auth, board_service=board_service, render_page=page)
-
-
 app.middleware("http")(demo_csrf_middleware(csrf))
 
 @app.get("/healthz")
@@ -734,11 +718,10 @@ def account_password_change(request: Request, current_password: str = Form(...),
     if credential is None or not credential.password_hash or not verify_password(credential.password_hash, current_password):
         return _password_change_error("현재 비밀번호가 올바르지 않습니다.")
     try:
-        auth.set_password(principal.user_id, new_password)
+        auth.set_password(principal.user_id, new_password, except_session_id=principal.session.id)
     except Exception as exc:
         return _password_change_error(str(exc))
-    revoked = auth.storage.revoke_sessions_for_user(principal.user_id, except_session_id=principal.session.id)
-    auth._audit("auth.account.password_change", actor_user_id=principal.user_id, target_user_id=principal.user_id, metadata={"revoked_other_sessions": revoked})
+    auth._audit("auth.account.password_change", actor_user_id=principal.user_id, target_user_id=principal.user_id)
     return RedirectResponse("/account/security?password=changed", status_code=303)
 
 
@@ -820,24 +803,12 @@ def login_page(request: Request):
     password_value = html.escape(OWNER_PASSWORD) if DEMO_MODE else ""
     next_notice = f"<div class='banner'>로그인 후 <code>{html.escape(next_path)}</code> 화면으로 이동합니다.</div>" if next_path != "/" else ""
     role_account_hint = ""
-    if DEMO_MODE:
-        accounts = "".join(
-            f"<tr><td><a href='/login?email={html.escape(entry.email, quote=True)}'><code>{html.escape(entry.email)}</code></a></td><td><code>{html.escape(entry.role.value)}</code></td><td>{html.escape(entry.expected_permission)}</td></tr>"
-            for entry in DEMO_BOARD_USERS
-        )
-        role_account_hint = (
-            "<details class='card role-accounts' open><summary><h2>권한별 게시판 테스트 계정</h2>"
-            "<span class='muted'>Email 클릭 → 로그인 폼 자동 입력</span></summary>"
-            f"<p class='muted'>모든 테스트 계정 비밀번호: <code>{html.escape(DEMO_BOARD_PASSWORD)}</code></p>"
-            "<table style='width:100%;border-spacing:0 10px'><thead><tr><th>Email</th><th>Role</th><th>게시판 권한</th></tr></thead>"
-            f"<tbody>{accounts}</tbody></table></details>"
-        )
     return page(
         "Login",
         f"""
         <h1>Coreline Auth Login</h1>
         {owner_hint}
-        <div class='nav'><a class='button secondary' href='/signup'>새 계정 가입</a><a class='button secondary' href='/login?next=/board'>게시판 데모 보기</a><a class='button secondary' href='/password-reset'>비밀번호 재설정</a><a class='button secondary' href='/social/google'>Google 로그인</a><a class='button secondary' href='/social/facebook'>Facebook 로그인</a></div>
+        <div class='nav'><a class='button secondary' href='/signup'>새 계정 가입</a><a class='button secondary' href='/password-reset'>비밀번호 재설정</a><a class='button secondary' href='/social/google'>Google 로그인</a><a class='button secondary' href='/social/facebook'>Facebook 로그인</a></div>
         <div class='notice'>Google/Facebook은 provider credential이 있으면 실제 OAuth redirect를 시작하고, 없으면 개발용 social connector로 테스트합니다.</div>
         {next_notice}
         <div class='login-grid'>
@@ -867,7 +838,7 @@ def signup_page(request: Request):
         "Sign up",
         """
         <h1>Coreline Auth Sign up</h1>
-        <p class='muted'>데모에서는 가입 계정이 <code>author</code> 권한으로 생성되어 게시판 글/댓글 작성과 본인 글 수정·삭제를 테스트할 수 있습니다. 관리자 페이지는 admin 계정만 접근 가능합니다.</p>
+        <p class='muted'>데모에서는 가입 계정이 <code>user</code> 권한으로 생성됩니다. 관리자 페이지는 admin 계정만 접근 가능합니다.</p>
         <section class='card'><form method='post' action='/signup'>
           <label>Email</label><input name='email' type='email' placeholder='new-user@example.com' autocomplete='username' required>
           <label>Password</label><input name='password' type='password' minlength='8' placeholder='8자 이상' autocomplete='new-password' required>
@@ -882,7 +853,7 @@ def signup_page(request: Request):
 @app.post("/signup")
 def signup_form(request: Request, email: str = Form(...), password: str = Form(...), display_name: str = Form("")):
     try:
-        user = auth.create_user(email=email, role=Role.AUTHOR, password=password, email_verified=True, display_name=display_name or None)
+        user = auth.create_user(email=email, role=Role.USER, password=password, email_verified=True, display_name=display_name or None)
         issued = auth.login_password(email=user.primary_email, password=password, context=request_context(request))
     except Exception as exc:
         return page("Sign up failed", f"<div class='card error'><h1>가입 실패</h1><p>{html.escape(str(exc))}</p><a class='button secondary' href='/signup'>돌아가기</a></div>", public=True)
@@ -897,8 +868,16 @@ def social_start(request: Request, provider: str):
         return Response("Unknown provider", status_code=404)
     connector = configured_connector(provider, request)
     if connector is not None:
-        state = auth.begin_social_login(provider=provider, return_to="/")
-        return RedirectResponse(connector.authorization_url(state=state), status_code=303)
+        nonce = generate_token() if connector.config.issuer else None
+        pkce = OAuthPKCE.create() if connector.config.issuer else None
+        state = auth.begin_social_login(provider=provider, return_to="/", nonce=nonce)
+        start = connector.start_authorization(state=state, nonce=nonce, pkce=pkce)
+        response = RedirectResponse(start.authorization_url, status_code=303)
+        if start.nonce:
+            _set_oauth_cookie(response, request, provider=provider, name="nonce", value=start.nonce)
+        if start.code_verifier:
+            _set_oauth_cookie(response, request, provider=provider, name="code_verifier", value=start.code_verifier)
+        return response
     provider_name = "Google" if provider == "google" else "Facebook"
     return page(
         f"{provider_name} login",
@@ -935,18 +914,72 @@ def configured_connector(provider: str, request: Request):
     return None
 
 
+def _oauth_cookie_name(provider: str, name: str) -> str:
+    return f"coreline_auth_oauth_{provider}_{name}"
+
+
+def _set_oauth_cookie(response: Response, request: Request, *, provider: str, name: str, value: str) -> None:
+    response.set_cookie(
+        _oauth_cookie_name(provider, name),
+        value,
+        max_age=auth.config.login_flow_ttl_seconds,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/",
+    )
+
+
+def _delete_oauth_cookies(response: Response, provider: str) -> None:
+    response.delete_cookie(_oauth_cookie_name(provider, "nonce"), path="/")
+    response.delete_cookie(_oauth_cookie_name(provider, "code_verifier"), path="/")
+
+
+def _oidc_jwks_for_connector(connector):
+    issuer = connector.config.issuer
+    if not issuer:
+        return None
+    issuer_host = (urlparse(issuer).hostname or "").lower()
+    metadata = discover_oidc_metadata(issuer=issuer, fetcher=OIDCMetadataClient(allowed_hosts={issuer_host}))
+    if not metadata.jwks_uri:
+        raise AuthenticationFailed("OIDC provider metadata does not include jwks_uri")
+    jwks_host = (urlparse(metadata.jwks_uri).hostname or "").lower()
+    cache = _oidc_jwks_caches.get(metadata.jwks_uri)
+    if cache is None:
+        cache = JWKSCache(OIDCMetadataClient(allowed_hosts={jwks_host}))
+        _oidc_jwks_caches[metadata.jwks_uri] = cache
+    return cache.get_jwks(metadata.jwks_uri)
+
+
 @app.get("/social/{provider}/callback")
 def social_callback(request: Request, provider: str, code: str, state: str):
     connector = configured_connector(provider, request)
     if connector is None:
         return Response("Provider is not configured", status_code=400)
     try:
-        profile = connector.exchange_code(code=code)
-        issued = auth.login_social(profile=profile, state=state, context=request_context(request))
+        if connector.config.issuer:
+            nonce = request.cookies.get(_oauth_cookie_name(provider, "nonce"))
+            code_verifier = request.cookies.get(_oauth_cookie_name(provider, "code_verifier"))
+            if not nonce or not code_verifier:
+                raise AuthenticationFailed("missing OAuth nonce or PKCE verifier")
+            auth.consume_social_login_state(provider=provider, state=state, nonce=nonce)
+            profile = connector.exchange_code(
+                code=code,
+                code_verifier=code_verifier,
+                expected_nonce=nonce,
+                id_token_jwks=_oidc_jwks_for_connector(connector),
+            )
+            issued = auth.login_social(profile=profile, context=request_context(request))
+        else:
+            profile = connector.exchange_code(code=code)
+            issued = auth.login_social(profile=profile, state=state, context=request_context(request))
     except Exception as exc:
-        return page("Social login failed", f"<div class='card error'><h1>소셜 로그인 실패</h1><p>{html.escape(str(exc))}</p><a class='button secondary' href='/login'>돌아가기</a></div>", public=True)
+        response = page("Social login failed", f"<div class='card error'><h1>소셜 로그인 실패</h1><p>{html.escape(str(exc))}</p><a class='button secondary' href='/login'>돌아가기</a></div>", public=True)
+        _delete_oauth_cookies(response, provider)
+        return response
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(SESSION_COOKIE_NAME, issued.token, httponly=True, samesite="lax", path="/")
+    _delete_oauth_cookies(response, provider)
     return response
 
 
@@ -1152,14 +1185,14 @@ def admin_page(request: Request, query: str = "", status: str = "", role: str = 
         "Admin",
         f"""<h1>전체 사용자 대시보드</h1><p class='muted'>{html.escape(principal.email)} 계정으로 가입자, role 분포, 세션, 권한 매트릭스를 관리합니다.</p>
         <section class='card'><h2>운영 KPI</h2><div class='admin-stat-grid'>{admin_kpis}</div></section>
-        <section class='card'><div class='board-toolbar'><div><h2>권한별 사용자 현황</h2><p class='muted'>role 카드를 누르면 아래 사용자 목록이 해당 권한으로 필터링됩니다.</p></div><a class='button secondary' href='/admin#admin-users'>전체 보기</a></div><div class='role-card-grid'>{role_cards}</div></section>
+        <section class='card'><div class='section-toolbar'><div><h2>권한별 사용자 현황</h2><p class='muted'>role 카드를 누르면 아래 사용자 목록이 해당 권한으로 필터링됩니다.</p></div><a class='button secondary' href='/admin#admin-users'>전체 보기</a></div><div class='role-card-grid'>{role_cards}</div></section>
         <section class='card'><h2>권한별 활동 요약</h2>{role_activity_table}</section>
         <section class='card'><h2>검색/필터</h2><form method='get' action='/admin'>
           <label>Query</label><input name='query' type='search' placeholder='email, display name, user id' value='{html.escape(query)}'>
           <div class='grid'><div><label>Status</label><select name='status'>{filter_status_options}</select></div><div><label>Role</label><select name='role'>{filter_role_options}</select></div></div>
           <button>검색</button> <a class='button secondary' href='/admin'>초기화</a>
         </form></section>
-        <section id='admin-users' class='card'><div class='board-toolbar'><div><h2>사용자 목록</h2><p class='muted'>선택된 role: <code>{html.escape(selected_role_text)}</code> · 표시 사용자 {len(users)}명 / 전체 {len(all_users)}명</p></div><a class='button secondary' href='/admin/audit'>감사 로그</a></div><table style='width:100%;border-spacing:0 10px'><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last Login</th><th>Login Count</th><th>Active Sessions</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table><a class='button' href='/'>대시보드</a> <a class='button secondary' href='/board'>게시판</a> <a class='button secondary' href='/admin/audit'>감사 로그</a></section>
+        <section id='admin-users' class='card'><div class='section-toolbar'><div><h2>사용자 목록</h2><p class='muted'>선택된 role: <code>{html.escape(selected_role_text)}</code> · 표시 사용자 {len(users)}명 / 전체 {len(all_users)}명</p></div><a class='button secondary' href='/admin/audit'>감사 로그</a></div><table style='width:100%;border-spacing:0 10px'><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last Login</th><th>Login Count</th><th>Active Sessions</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table><a class='button' href='/'>대시보드</a> <a class='button secondary' href='/admin/audit'>감사 로그</a></section>
         <section class='card'><h2>권한 매트릭스</h2><p class='muted'>RBAC role별 실제 permission 허용 여부입니다. 체크는 서버 측 정책 엔진 기준입니다.</p>{permission_matrix}</section>{cards}""",
     )
 

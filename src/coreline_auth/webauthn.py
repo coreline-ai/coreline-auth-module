@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -19,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
 from .errors import AuthenticationFailed, AuthValidationError
 from .security import compare_hash, hash_secret
+
+_LOCAL_ORIGIN_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,10 +132,30 @@ def _verify_challenge(challenge: str, expected_challenge_hash: str) -> None:
 
 
 def _validate_origin_and_rp(*, origin: str, rp_id: str) -> None:
-    if not origin.startswith("https://") and not origin.startswith("http://localhost") and not origin.startswith("http://127.0.0.1"):
+    parsed = urlparse(origin)
+    origin_host = (parsed.hostname or "").lower().rstrip(".")
+    origin_scheme = parsed.scheme.lower()
+    if not origin_scheme or not origin_host or parsed.username or parsed.password:
+        raise AuthValidationError("invalid WebAuthn origin")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise AuthValidationError("WebAuthn origin must not include a path, query, or fragment")
+
+    is_local_http = origin_scheme == "http" and origin_host in _LOCAL_ORIGIN_HOSTS
+    if origin_scheme != "https" and not is_local_http:
         raise AuthValidationError("WebAuthn origin must be HTTPS outside localhost")
-    if not rp_id or "://" in rp_id or "/" in rp_id:
+    rp_host = rp_id.lower().rstrip(".")
+    if not rp_host or "://" in rp_id or "/" in rp_id or "\\" in rp_id or any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in rp_id):
         raise AuthValidationError("rp_id must be a host name")
+    if ":" in rp_host and rp_host not in _LOCAL_ORIGIN_HOSTS:
+        raise AuthValidationError("rp_id must not include a port")
+
+    if is_local_http:
+        if rp_host != origin_host:
+            raise AuthValidationError("WebAuthn RP ID does not match localhost origin")
+        return
+
+    if origin_host != rp_host and not origin_host.endswith(f".{rp_host}"):
+        raise AuthValidationError("WebAuthn RP ID does not match origin")
 
 
 def _load_public_key(public_key_pem: str):
