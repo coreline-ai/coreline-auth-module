@@ -792,7 +792,7 @@ Board demo accounts keep the previous selectable role test flow:
 
 ### 🖼️ Demo screenshots
 
-> **Login screenshot refreshed 2026-06-07** from `http://127.0.0.1:8010/login` (`make run-demo`, `CORELINE_AUTH_DEMO_MODE=true`). Remaining gallery screenshots are historical captures from 2026-05-26. Click any image to view full resolution.
+> **16 current Auth demo screenshots captured 2026-06-07** from `http://127.0.0.1:8010` (`make run-demo`, clean demo DB, `CORELINE_AUTH_DEMO_MODE=true`). Click any image to view full resolution.
 
 #### 🔐 Authentication flows
 
@@ -800,7 +800,7 @@ Board demo accounts keep the previous selectable role test flow:
 <tr>
 <td width="50%" align="center">
 <a href="./docs/screenshots/01-login.png"><img src="./docs/screenshots/01-login.png" alt="Login page" width="100%"/></a>
-<br/><sub><b>🔑 Login</b> · <code>/login</code> — Email/password + magic link + social + per-role test accounts</sub>
+<br/><sub><b>🔑 Login</b> · <code>/login</code> — Email/password + magic link + social login entrypoints</sub>
 </td>
 <td width="50%" align="center">
 <a href="./docs/screenshots/02-signup.png"><img src="./docs/screenshots/02-signup.png" alt="Signup page" width="100%"/></a>
@@ -814,7 +814,7 @@ Board demo accounts keep the previous selectable role test flow:
 </td>
 <td width="50%" align="center">
 <a href="./docs/screenshots/04-magic-link-page.png"><img src="./docs/screenshots/04-magic-link-page.png" alt="Magic link consume" width="100%"/></a>
-<br/><sub><b>✨ Magic Link</b> · <code>/magic-link/consume</code> — Atomic one-time token consume</sub>
+<br/><sub><b>✨ Magic Link</b> · <code>/magic-link/consume</code> — Atomic one-time token consume result</sub>
 </td>
 </tr>
 <tr>
@@ -829,13 +829,9 @@ Board demo accounts keep the previous selectable role test flow:
 
 <table>
 <tr>
-<td width="50%" align="center">
+<td width="100%" align="center">
 <a href="./docs/screenshots/06-dashboard.png"><img src="./docs/screenshots/06-dashboard.png" alt="Dashboard" width="100%"/></a>
 <br/><sub><b>🏠 Dashboard</b> · <code>/</code> — Current session, role, permissions overview</sub>
-</td>
-<td width="50%" align="center">
-<a href="./docs/screenshots/09-admin.png"><img src="./docs/screenshots/09-admin.png" alt="Admin" width="100%"/></a>
-<br/><sub><b>🛡️ Admin</b> · <code>/admin</code> — User lifecycle, audit and system readiness</sub>
 </td>
 </tr>
 </table>
