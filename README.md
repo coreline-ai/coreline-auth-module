@@ -792,7 +792,7 @@ Board demo accounts keep the previous selectable role test flow:
 
 ### 🖼️ Demo screenshots
 
-> **18 pages captured 2026-05-26** from `make run-demo` with `CORELINE_AUTH_DEMO_MODE=true`. Click any image to view full resolution.
+> **Login screenshot refreshed 2026-06-07** from `http://127.0.0.1:8010/login` (`make run-demo`, `CORELINE_AUTH_DEMO_MODE=true`). Remaining gallery screenshots are historical captures from 2026-05-26. Click any image to view full resolution.
 
 #### 🔐 Authentication flows
 
