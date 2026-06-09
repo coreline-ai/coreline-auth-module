@@ -901,7 +901,7 @@ Board demo accounts keep the previous selectable role test flow:
 <table>
 <tr>
 <td width="100%" align="center">
-<a href="https://raw.githack.com/coreline-ai/coreline-auth-module/main/docs/reports/coreline-auth-feature-usage.html#directory-anatomy"><img src="./docs/screenshots/19-directory-anatomy-report.png" alt="Directory anatomy excerpt from the Coreline Auth feature usage report" width="100%"/></a>
+<a href="https://htmlpreview.github.io/?https://github.com/coreline-ai/coreline-auth-module/blob/main/docs/reports/coreline-auth-feature-usage.html#directory-anatomy"><img src="./docs/screenshots/19-directory-anatomy-report.png" alt="Directory anatomy excerpt from the Coreline Auth feature usage report" width="100%"/></a>
 <br/><sub><b>📂 Directory Anatomy</b> · Click the image to open the rendered HTML feature usage report · <a href="./docs/reports/coreline-auth-feature-usage.html">HTML source</a></sub>
 </td>
 </tr>
