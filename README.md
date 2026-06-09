@@ -896,6 +896,17 @@ Board demo accounts keep the previous selectable role test flow:
 </tr>
 </table>
 
+#### 🧭 Feature usage report excerpt
+
+<table>
+<tr>
+<td width="100%" align="center">
+<a href="./docs/screenshots/19-directory-anatomy-report.png"><img src="./docs/screenshots/19-directory-anatomy-report.png" alt="Directory anatomy excerpt from the Coreline Auth feature usage report" width="100%"/></a>
+<br/><sub><b>📂 Directory Anatomy</b> · Adaptive HTML feature usage report excerpt — core, adapter, demo, and proof layers mapped for repository navigation</sub>
+</td>
+</tr>
+</table>
+
 > 💡 **Regenerate screenshots:** boot the demo (`make run-demo`, port 8010), then drive a headless browser through the route list. Login + admin pages need owner credentials; `/account/*` pages need any active session.
 
 ---
